@@ -1,0 +1,10 @@
+build/
+.gradle/
+.kotlin/
+local.properties
+*.apk
+*.jks
+*.keystore
+AGENTS.md
+icono-antiguo.png
+Imagen de ChatGPT*.png
