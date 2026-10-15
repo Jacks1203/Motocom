@@ -18,6 +18,9 @@ devolver después a la moto.
 3. Sigue la [guía de conexión](GUIA-CONEXION.md): la primera vez hay que activar la depuración
    inalámbrica y emparejar Motocom consigo misma (no hace falta ordenador ni Shizuku).
 
+Desde la 0.7 el APK va firmado con la clave propia de Motocom. Si tenías la 0.6 o una anterior,
+desinstálala antes de instalar la 0.7; después las actualizaciones se instalan encima.
+
 Requisitos: Android 10 o superior (Android 11 para emparejar sin ordenador; Android 13 para que la
 imagen siga con el móvil bloqueado).
 
@@ -29,7 +32,9 @@ Con el SDK de Android instalado y `local.properties` apuntando a él (`sdk.dir=�
 ./gradlew assembleDebug
 ```
 
-El APK queda en `app/build/outputs/apk/debug/`.
+El APK queda en `app/build/outputs/apk/debug/`. La versión publicada se hace con
+`./gradlew assembleRelease` y necesita la clave de firma, que no está en el repositorio
+(`keystore.properties` con `storeFile`, `storePassword`, `keyAlias` y `keyPassword`).
 
 ## Documentación
 
