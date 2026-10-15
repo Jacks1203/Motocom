@@ -17,7 +17,7 @@ import java.util.concurrent.TimeUnit
  * The picture for the bike is another app: Waze, Google Maps or whichever was chosen.
  *
  * A screen of the bike's size is made through ADB ([com.motocom.shell.DisplayService]),
- * painting straight into the encoder, and the app is taken to it. Android draws the app there
+ * painting into the encoder through [BlackEdges], and the app is taken to it. Android draws the app there
  * as it would on a second monitor, so it fills the whole of the bike's screen, and none of this
  * needs the phone's own screen: it can be off and locked.
  *
@@ -36,6 +36,7 @@ class MirrorPicture(
     private var codec: MediaCodec? = null
     private var codecThread: HandlerThread? = null
     private var surface: Surface? = null
+    private var edges: BlackEdges? = null
 
     /** The screen the chosen app was last taken to; another screen needs it taken again. */
     @Volatile private var appOn = -1
@@ -82,8 +83,10 @@ class MirrorPicture(
             codecThread = thread
             surface = input
             log("codificador ${encoder.name}: ${width}x$height a ${request.bitRate / 1000} kbit/s")
+            val framed = BlackEdges(input, width, height)
+            edges = framed
 
-            val id = shell.show(input, width, height, dpi())
+            val id = shell.show(framed.surface, width, framed.inner, dpi())
             if (id < 0) {
                 stopEncoder()
                 return false
@@ -144,6 +147,8 @@ class MirrorPicture(
     private fun stopEncoder() {
         // The screen lets go of the surface before the surface goes.
         if (surface != null) runCatching { ShellLink.display?.detachSurface() }
+        edges?.release()
+        edges = null
         runCatching { codec?.stop() }
         runCatching { codec?.release() }
         codec = null
