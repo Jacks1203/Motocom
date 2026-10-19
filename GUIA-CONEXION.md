@@ -1,8 +1,8 @@
-# Motocom 0.3: conexión directa por ADB, sin Shizuku
+# Guía de conexión de Motocom
 
 Motocom conecta el móvil al wifi directo de la pantalla EasyConn de la moto, crea una pantalla virtual de 592 × 816 y envía vídeo H.264 de la app elegida (por ejemplo Waze o Google Maps). Puedes traer esa app al móvil para escribir un destino y devolverla a la moto. La densidad ajusta el tamaño de las letras.
 
-ADB da al proceso de pantalla los permisos de Android necesarios para abrir otras apps en ella. Esta versión integra el cliente ADB: no necesitas instalar ni iniciar Shizuku. El emparejamiento autoriza únicamente la identidad de Motocom en este móvil; no permite saltarse la autorización de Android.
+ADB da al proceso de pantalla los permisos de Android necesarios para abrir otras apps en ella (más detalle en [Por qué necesita ADB](README.md#por-qué-necesita-adb)). Esta versión integra el cliente ADB: no necesitas instalar ni iniciar Shizuku. El emparejamiento autoriza únicamente la identidad de Motocom en este móvil; no permite saltarse la autorización de Android.
 
 ## Lo que necesitas
 
@@ -15,7 +15,7 @@ ADB da al proceso de pantalla los permisos de Android necesarios para abrir otra
 
 En Ajustes → Acerca del teléfono, toca siete veces **Número de compilación**; algunos fabricantes lo sitúan en Información de software o usan el nombre de su versión del sistema. Introduce el PIN si lo pide.
 
-Conecta el móvil a un wifi. En **Opciones de desarrollador**, activa **Depuración inalámbrica** y acepta la red. Motocom incluye un botón para abrir las opciones de desarrollador.
+Conecta el móvil a un wifi. En **Opciones de desarrollador**, activa **Depuración inalámbrica** y acepta la red. En Motocom, toca el indicador de ADB de arriba a la derecha (pone **Configurar ADB**): se abre la pantalla **ADB**, que tiene un botón para abrir las opciones de desarrollador.
 
 ## 2. Emparejar una vez
 
@@ -46,9 +46,9 @@ Referencias de los fabricantes: [pantalla dividida en Xiaomi](https://www.mi.com
 
 ### Introducir el código
 
-1. Abre Motocom y Ajustes en **pantalla dividida**. Es importante mantener abierto el diálogo de emparejamiento de Android; si lo cierras, el código y el puerto pueden caducar.
+1. Abre Motocom en su pantalla **ADB** (el indicador de arriba a la derecha) y Ajustes en **pantalla dividida**. Es importante mantener abierto el diálogo de emparejamiento de Android; si lo cierras, el código y el puerto pueden caducar.
 2. En Depuración inalámbrica, pulsa **Vincular dispositivo con código de vinculación**.
-3. Android muestra una dirección como `192.168.1.20:37123` y un código de seis cifras. Introduce **37123** en **Puerto de emparejamiento** de Motocom y las seis cifras en **Código**. Los números son ejemplos: usa los de tu móvil.
+3. Android muestra una dirección como `192.168.1.20:37123` y un código de seis cifras. En el paso **1 · Emparejar** de Motocom, introduce **37123** en **Puerto de emparejamiento** y las seis cifras en **Código de 6 cifras**. Los números son ejemplos: usa los de tu móvil.
 4. Pulsa **Emparejar** y espera la confirmación.
 
 Motocom se conecta a `127.0.0.1`, es decir, al propio móvil. No hay que introducir la IP ni conectarse a otro dispositivo. La identidad se guarda en el almacenamiento privado de la app y no entra en copias de seguridad. El código de emparejamiento no se guarda.
@@ -57,8 +57,8 @@ Motocom se conecta a `127.0.0.1`, es decir, al propio móvil. No hay que introdu
 
 1. Cierra el diálogo del código y vuelve a la pantalla principal de **Depuración inalámbrica**.
 2. Mira **Dirección IP y puerto**. El número después de `:` es el **puerto de conexión**, normalmente diferente al de emparejamiento.
-3. Introdúcelo en **Puerto de conexión ADB** y pulsa **Iniciar ADB**.
-4. Espera a que aparezca **ADB listo**.
+3. Introdúcelo en el paso **2 · Iniciar**, en **Puerto de conexión**, y pulsa **Iniciar ADB**.
+4. Espera a que aparezca **ADB activo**. Pulsa **Volver a la moto**.
 
 A partir de ahí el proceso de pantalla se comunica con la app mediante Binder, sin mantener una sesión ADB de red. Puedes desactivar la depuración inalámbrica después del arranque. El cambio de wifi no requiere repetir el emparejamiento. El proceso sigue vivo aunque Android cierre Motocom: al volver a abrirla se engancha solo, sin wifi. Solo hay que iniciarlo otra vez tras reiniciar el móvil o reinstalar la app. Solo atiende órdenes de Motocom.
 
@@ -67,29 +67,32 @@ A partir de ahí el proceso de pantalla se comunica con la app mediante Binder, 
 1. Cierra completamente Carbit Ride y OffNavigator: usan los mismos puertos que Motocom.
 2. Enciende la pantalla de la moto y abre su función de conexión al teléfono.
 3. Activa **wifi y ubicación** en el móvil.
-4. En Motocom, elige la app que quieres mostrar y ajusta el tamaño si hace falta.
-5. Pulsa **Conectar** y acepta los permisos solicitados. La app busca la moto (su nombre empieza por `HJ-`) mediante wifi directo.
-6. Cuando llegue la imagen, prueba **Traer al móvil** y **Mandar a la moto**. Comprueba parado qué sucede al bloquear el teléfono antes de usarlo en ruta.
+4. En Motocom, pulsa **Leer QR de la moto** y apunta al código de su pantalla. Solo hace falta la primera vez; después la moto aparece en la fila **Moto**.
+5. En la fila **App**, elige la app que quieres mostrar.
+6. En **Tamaño en la moto**, elige el tamaño de letras y botones. La miniatura muestra cuánto mapa cabe. **Elígelo antes de conectar: una vez conectado no se puede cambiar.**
+7. Pulsa **Conectar** y acepta los permisos solicitados. La app busca por wifi directo la moto que leyó en el QR.
+8. Cuando llegue la imagen, el panel de arriba pone **En la moto**. Para escribir un destino, pulsa **Al móvil** y, al terminar, **A la moto**. Comprueba parado qué sucede al bloquear el teléfono antes de usarlo en ruta.
 
-La conexión de vídeo con la moto no necesita internet. Los mapas o servicios de navegación pueden necesitar datos móviles o mapas descargados. El botón para quitar el ahorro de batería puede ayudar a mantener Motocom en segundo plano.
+La conexión de vídeo con la moto no necesita internet. Los mapas o servicios de navegación pueden necesitar datos móviles o mapas descargados. Si Motocom avisa del ahorro de batería, pulsa **Permitir**: ayuda a mantener la imagen con el móvil bloqueado.
 
 ## Las siguientes veces
 
-- Si Motocom muestra **ADB listo**, basta con pulsar Conectar.
-- Si Android cierra Motocom o fuerzas su cierre, el proceso ADB sigue vivo: al abrirla vuelve **ADB listo** en uno o dos segundos.
+- Basta con pulsar **Conectar**: si ADB está parado, Motocom lo inicia sola (si Android le deja encender la depuración inalámbrica; si no, actívala tú antes).
+- Si Android cierra Motocom o fuerzas su cierre, el proceso ADB sigue vivo: al abrirla vuelve **ADB activo** en uno o dos segundos.
 - Tras reiniciar el teléfono o reinstalar la app: activa la depuración inalámbrica y repite **Iniciar ADB**. Fuera de casa, sin wifi, mira el apartado siguiente.
 - No suele hacer falta repetir **Emparejar**. Hazlo si Android ha olvidado la identidad, has borrado los datos de Motocom o reinstalado la app. Android puede revocar autorizaciones inactivas.
 - **Desconectar** detiene el vídeo, libera la pantalla virtual y finaliza la búsqueda de la moto. El proceso ADB permanece disponible hasta reiniciar el móvil.
 
 ## Fuera de casa, sin wifi
 
-Si ya ponía **ADB listo**, no hace falta nada: ADB sigue en marcha hasta reiniciar el móvil, aunque Android cierre Motocom. Si el móvil se ha reiniciado o apagado, usa el wifi de la moto (probado el 09-10-2026 con el POCO F5):
+Si ya ponía **ADB activo**, no hace falta nada: ADB sigue en marcha hasta reiniciar el móvil, aunque Android cierre Motocom. Si el móvil se ha reiniciado o apagado, usa el wifi de la moto (probado el 09-10-2026 con el POCO F5):
 
 1. Enciende la moto y abre la conexión con el móvil en su pantalla.
-2. En **Ajustes → Wifi**, conéctate a la red `DIRECT-HJ-…` de tu moto, con la contraseña que indica el QR de su pantalla, como a cualquier wifi. Si avisa de que no hay internet, quédate conectado igualmente.
-3. En Motocom pulsa **Iniciar ADB** y espera a **ADB listo**. Si Android pregunta si permites la depuración en esa red, acepta.
-4. **Importante:** vuelve a **Ajustes → Wifi**, toca esa red y pulsa **Olvidar**. Si no la olvidas, la pantalla de la moto no se conecta.
-5. Vuelve a Motocom y pulsa **Conectar**.
+2. Lee el QR de la pantalla de la moto con Motocom (no necesita ADB). Toca la fila **Moto** de la pantalla principal: en **Wifi** verás cómo se llama la red de la moto y en **Contraseña**, su contraseña.
+3. En **Ajustes → Wifi**, conéctate a esa red con esa contraseña, como a cualquier wifi. Si avisa de que no hay internet, quédate conectado igualmente.
+4. En Motocom, en la pantalla **ADB**, pulsa **Iniciar ADB** y espera a **ADB activo**. Si Android pregunta si permites la depuración en esa red, acepta.
+5. **Importante:** vuelve a **Ajustes → Wifi**, toca esa red y pulsa **Olvidar**. Si no la olvidas, la pantalla de la moto no se conecta.
+6. Vuelve a Motocom y pulsa **Conectar**.
 
 ## Si falla
 
@@ -103,7 +106,7 @@ Si ya ponía **ADB listo**, no hace falta nada: ADB sigue en marcha hasta reinic
 | La moto no recibe vídeo | Cierra Carbit Ride y OffNavigator y vuelve a conectar. Comparte el registro de Motocom. |
 | Se para al bloquear | Revisa el ahorro de batería, la versión de Android y las restricciones de la app elegida. |
 
-Usa **Registro → Compartir** para guardar los detalles del intento. Si un emparejamiento queda sin respuesta, cierra completamente Motocom y reintenta con un diálogo de código nuevo.
+Para guardar los detalles del intento, toca el icono **Registro** de arriba a la derecha y después **Compartir**. Si un emparejamiento queda sin respuesta, cierra completamente Motocom y reintenta con un diálogo de código nuevo.
 
 ## Android 10: activación por ordenador
 
@@ -114,7 +117,7 @@ adb devices
 adb tcpip 5555
 ```
 
-En Motocom introduce **5555** como puerto de conexión, pulsa Iniciar ADB y acepta la autorización de la nueva clave en el móvil si aparece; reintenta si la autorización tarda más que la conexión. No uses los campos de emparejamiento. Tras ver ADB listo puedes desconectar el cable. Esta activación se pierde al reiniciar. Para cerrar el puerto TCP posteriormente, conecta por USB y ejecuta `adb usb`.
+En Motocom introduce **5555** como puerto de conexión, pulsa Iniciar ADB y acepta la autorización de la nueva clave en el móvil si aparece; reintenta si la autorización tarda más que la conexión. No uses los campos de emparejamiento. Tras ver **ADB activo** puedes desconectar el cable. Esta activación se pierde al reiniciar. Para cerrar el puerto TCP posteriormente, conecta por USB y ejecuta `adb usb`.
 
 ## Implementación y alcance de las comprobaciones
 

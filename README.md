@@ -24,6 +24,48 @@ desinstálala antes de instalar la 0.7; después las actualizaciones se instalan
 Requisitos: Android 10 o superior (Android 11 para emparejar sin ordenador; Android 13 para que la
 imagen siga con el móvil bloqueado).
 
+## Por qué necesita ADB
+
+Para que Waze o Maps salgan en la moto, Motocom crea una segunda pantalla del tamaño de la de la
+moto, abre en ella la app elegida y la mueve entre esa pantalla y la del móvil. Android no deja
+que una app normal abra otras apps en una pantalla creada por ella: eso solo lo puede hacer el
+usuario «shell», el mismo que usa un ordenador conectado con `adb` (y apps como scrcpy).
+
+Por eso Motocom usa la **depuración inalámbrica** de Android para conectarse por ADB **al propio
+móvil** (`127.0.0.1`), sin root, sin ordenador y sin Shizuku:
+
+- El emparejamiento con el código autoriza solo la clave de Motocom en ese móvil. Se hace una vez.
+- Por ADB, Motocom arranca un pequeño proceso suyo con permisos de shell. Ese proceso solo hace
+  cuatro cosas: crear la pantalla de la moto, llevar la app elegida a ella o de vuelta al móvil,
+  quitar esa pantalla y cerrarse. Solo atiende a Motocom.
+- La primera vez, Motocom se concede por ADB el permiso de cambiar ajustes del sistema
+  (`WRITE_SECURE_SETTINGS`), solo para poder encender y apagar ella misma la depuración
+  inalámbrica las siguientes veces.
+- Nada sale a internet: ADB va por dentro del propio móvil.
+
+Ese proceso sigue en marcha hasta que reinicias el móvil. Para retirar la autorización, entra en
+Opciones de desarrollador → «Revocar autorizaciones de depuración» y reinicia el móvil.
+
+## Permisos
+
+| Permiso | Para qué lo usa Motocom |
+|---|---|
+| Cámara | Leer el código QR de la pantalla de la moto (nombre de su wifi y contraseña). Solo mientras lees el QR. |
+| Dispositivos wifi cercanos (Android 13+) | Encontrar el wifi directo de la pantalla de la moto. Está declarado como «no se usa para la ubicación». |
+| Ubicación | Android la exige para buscar dispositivos por wifi directo. Motocom no lee ni guarda tu ubicación. |
+| Ver y cambiar el wifi y la red | Conectarse al wifi directo de la moto. |
+| Acceso a la red (`INTERNET`) | Hablar con la moto por su wifi y con ADB dentro del propio móvil. Motocom no usa internet (la app de mapas sí puede usarlo). |
+| Notificaciones | Mostrar la notificación «Pantalla de la moto» mientras manda la imagen. |
+| Servicio en primer plano (dispositivo conectado) | Seguir mandando la imagen con la app en segundo plano o el móvil bloqueado. |
+| Mantener el móvil activo (`WAKE_LOCK`) | Que el móvil no se duerma mientras manda la imagen con la pantalla apagada. |
+| Pedir quitar la optimización de batería | Ofrecer el botón «Permitir» para que Android no corte la imagen con el móvil bloqueado. Es opcional. |
+| Cambiar ajustes del sistema (`WRITE_SECURE_SETTINGS`) | Encender y apagar sola la depuración inalámbrica. No se puede pedir desde la app: se lo concede ella misma por ADB (ver arriba). |
+| Ver las apps instaladas | Mostrar la lista para elegir qué app va a la moto. |
+
+Motocom no tiene anuncios ni analíticas y no manda datos a ningún servidor. El registro de cada
+conexión se guarda solo en el móvil, y solo sale de él si tú lo compartes desde la pantalla
+Registro.
+
 ## Compilar
 
 Con el SDK de Android instalado y `local.properties` apuntando a él (`sdk.dir=…`):
