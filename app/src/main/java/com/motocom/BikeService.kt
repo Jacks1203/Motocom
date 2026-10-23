@@ -10,6 +10,7 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.os.Looper
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
@@ -30,7 +31,10 @@ class BikeService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
-            ACTION_START -> begin()
+            ACTION_START -> {
+                if (pending > 0) pending--
+                begin()
+            }
             ACTION_DISCONNECT -> Moto.get(this).stop()
             else -> end()
         }
@@ -46,10 +50,17 @@ class BikeService : Service() {
                 0
             }
             ServiceCompat.startForeground(this, NOTIF_ID, notification(), type)
+            foreground = true
         } catch (e: Exception) {
             // Without it the bike still works while this app is open and in front.
             e.printStackTrace()
-            stopSelf()
+            foreground = false
+            if (pending == 0) stopSelf()
+            return
+        }
+        // Stopped before it got here: Android needed startForeground first, now it can go.
+        if (!wanted) {
+            end()
             return
         }
         if (wakeLock == null) {
@@ -65,7 +76,9 @@ class BikeService : Service() {
         wakeLock?.let { if (it.isHeld) it.release() }
         wakeLock = null
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
-        stopSelf()
+        foreground = false
+        // A start still on its way must reach startForeground first; it ends it then.
+        if (pending == 0) stopSelf()
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
@@ -75,6 +88,7 @@ class BikeService : Service() {
     }
 
     override fun onDestroy() {
+        foreground = false
         wakeLock?.let { if (it.isHeld) it.release() }
         wakeLock = null
         super.onDestroy()
@@ -120,9 +134,28 @@ class BikeService : Service() {
         private const val CHANNEL_ID = "motocom_moto"
         private const val NOTIF_ID = 44
 
+        /*
+         * A service asked for with startForegroundService must call startForeground before it is
+         * stopped, or Android closes the app. So stop only stops it once every start has got
+         * there; otherwise the last start to arrive sees it is no longer wanted and ends it.
+         * All on the main thread, like onStartCommand.
+         */
+        /** Whether the service should be running: the last of start or stop. */
+        private var wanted = false
+        /** It called startForeground and has not ended since. */
+        private var foreground = false
+        /** Starts asked for that have not reached onStartCommand yet. */
+        private var pending = 0
+
         fun start(context: Context) {
+            if (Looper.myLooper() != Looper.getMainLooper()) {
+                ContextCompat.getMainExecutor(context).execute { start(context) }
+                return
+            }
+            wanted = true
             try {
                 ContextCompat.startForegroundService(context, Intent(context, BikeService::class.java).setAction(ACTION_START))
+                pending++
             } catch (e: Exception) {
                 // Asked from the background, Android can refuse; the bike works without it while the app is open.
                 e.printStackTrace()
@@ -130,7 +163,14 @@ class BikeService : Service() {
         }
 
         fun stop(context: Context) {
-            runCatching { context.stopService(Intent(context, BikeService::class.java)) }
+            if (Looper.myLooper() != Looper.getMainLooper()) {
+                ContextCompat.getMainExecutor(context).execute { stop(context) }
+                return
+            }
+            wanted = false
+            if (foreground && pending == 0) {
+                runCatching { context.stopService(Intent(context, BikeService::class.java)) }
+            }
         }
     }
 }

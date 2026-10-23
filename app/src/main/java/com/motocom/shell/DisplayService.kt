@@ -60,6 +60,7 @@ class DisplayService() : IBikeDisplay.Stub() {
     override fun destroy() {
         allow()
         release()
+        forgetPairing()
         exitProcess(0)
     }
 
@@ -94,6 +95,7 @@ class DisplayService() : IBikeDisplay.Stub() {
         display?.surface = null
     }
 
+    /** Starts with "fallo: " when the app could neither be moved nor started there. */
     @Synchronized
     override fun bring(packageName: String, component: String, displayId: Int): String {
         allow()
@@ -104,14 +106,22 @@ class DisplayService() : IBikeDisplay.Stub() {
         }
         if (moved == null || !moved.startsWith("movida")) {
             // Not open yet, or this Android does not let it be moved: start it there instead.
-            val started = run(
+            val started = output(
                 "am", "start", "--display", displayId.toString(), "--windowingMode", "1",
                 "-f", "0x10200000", // new task, reset if needed
                 "-n", component
             )
-            return listOfNotNull(moved, "am start: $started").joinToString("; ").also(::say)
+            val text = listOfNotNull(moved, "am start: ${tidy(started)}").joinToString("; ")
+            return (if (startFailed(started)) "fallo: $text" else text).also(::say)
         }
         return moved.also(::say)
+    }
+
+    /** An existing task brought forward, or the intent handed to it, still counts as there. */
+    private fun startFailed(output: String): Boolean {
+        if ("Error" in output || "Exception" in output) return true
+        if ("Warning: Activity not started" !in output) return false
+        return "brought to the front" !in output && "delivered to currently running" !in output
     }
 
     @Synchronized
@@ -126,6 +136,21 @@ class DisplayService() : IBikeDisplay.Stub() {
         display = null
         device?.let { runCatching { it.javaClass.getMethod("close").invoke(it) } }
         device = null
+    }
+
+    /**
+     * Undoes the shell's pairing with the bike, which nobody else ever would. Only once Motocom
+     * is gone for good: undone and redone on every connection is a path Android 17 was never
+     * seen to take, and kept, the next connection after a restart finds it made.
+     */
+    fun forgetPairing() {
+        if (Build.VERSION.SDK_INT < 34) return
+        runCatching {
+            if (findPairing() != null) {
+                android.util.Log.i("MotocomADB", "quitando el emparejamiento de la moto: " +
+                    run("cmd", "companiondevice", "disassociate", user(), SHELL, PAIRING))
+            }
+        }
     }
 
     override fun displayId(): Int {
@@ -148,15 +173,19 @@ class DisplayService() : IBikeDisplay.Stub() {
     }
 
     private fun create(surface: Surface, width: Int, height: Int, dpi: Int): VirtualDisplay {
+        val first = Events()
         val plain = displayManager().createVirtualDisplay(
-            "Pantalla de la moto", width, height, dpi, surface, flags(), events, handler
+            "Pantalla de la moto", width, height, dpi, surface, flags(), first, handler
         )
         // Before 14 there is no screen of its own to be had, and none was asked for.
-        if (Build.VERSION.SDK_INT < 34 || !withThePhone(plain.display.displayId)) return plain
+        if (Build.VERSION.SDK_INT < 34 || !withThePhone(plain.display.displayId)) {
+            return plain.also { first.of = it }
+        }
         say("este Android apagaría la pantalla de la moto con la del móvil: se hace como dispositivo conectado")
-        plain.release()
-        return try {
-            onOwnDevice(surface, width, height, dpi)
+        plain.release() // Its own events stay unbound, so its stop is ignored.
+        val events = Events()
+        val made = try {
+            onOwnDevice(surface, width, height, dpi, events)
         } catch (e: Throwable) {
             say("no se pudo hacer como dispositivo conectado (${e.cause ?: e}): se apagará al bloquear")
             device?.let { runCatching { it.javaClass.getMethod("close").invoke(it) } }
@@ -165,6 +194,8 @@ class DisplayService() : IBikeDisplay.Stub() {
                 "Pantalla de la moto", width, height, dpi, surface, flags(), events, handler
             )
         }
+        events.of = made
+        return made
     }
 
     /** Whether Android put [displayId] with the phone's screen, to sleep and wake as one. */
@@ -184,7 +215,7 @@ class DisplayService() : IBikeDisplay.Stub() {
      */
     @SuppressLint("PrivateApi")
     @RequiresApi(34)
-    private fun onOwnDevice(surface: Surface, width: Int, height: Int, dpi: Int): VirtualDisplay {
+    private fun onOwnDevice(surface: Surface, width: Int, height: Int, dpi: Int, events: Events): VirtualDisplay {
         val context = ShellContext(context ?: systemContext())
         val binder = Class.forName("android.os.ServiceManager")
             .getMethod("getService", String::class.java).invoke(null, "virtualdevice")
@@ -215,35 +246,42 @@ class DisplayService() : IBikeDisplay.Stub() {
         ).invoke(made, config, Executor { handler.post(it) }, events) as VirtualDisplay
     }
 
-    /** The shell's pairing with the bike, made the first time. */
+    /** The shell's pairing with the bike, made the first time and undone by [forgetPairing]. */
     private fun association(): Int {
-        val user = (Process.myUid() / 100_000).toString()
-        fun find() = output("cmd", "companiondevice", "list", user).lineSequence()
-            .filter { "mPackageName='$SHELL'" in it && "mDeviceMacAddress=$PAIRING" in it }
-            .firstNotNullOfOrNull { Regex("mId=(\\d+)").find(it)?.groupValues?.get(1)?.toInt() }
-        find()?.let { return it }
+        findPairing()?.let { return it }
         say("emparejando la moto como dispositivo conectado: " +
-            run("cmd", "companiondevice", "associate", user, SHELL, PAIRING, APP_STREAMING))
-        return find() ?: error("no se pudo emparejar")
+            run("cmd", "companiondevice", "associate", user(), SHELL, PAIRING, APP_STREAMING))
+        return findPairing() ?: error("no se pudo emparejar")
     }
+
+    private fun user() = (Process.myUid() / 100_000).toString()
+
+    private fun findPairing(): Int? = output("cmd", "companiondevice", "list", user()).lineSequence()
+        .filter { "mPackageName='$SHELL'" in it && "mDeviceMacAddress=$PAIRING" in it }
+        .firstNotNullOfOrNull { Regex("mId=(\\d+)").find(it)?.groupValues?.get(1)?.toInt() }
 
     /** Takes whatever is on [displayId] back to the phone. */
     @SuppressLint("PrivateApi")
     private fun returnTasks(displayId: Int) {
-        val atm = Class.forName("android.app.ActivityTaskManager")
-        val instance = atm.getMethod("getInstance").invoke(null)
-        @Suppress("UNCHECKED_CAST")
-        val tasks = atm.getMethod("getTasks", Int::class.javaPrimitiveType).invoke(instance, 100)
-            as List<ActivityManager.RunningTaskInfo>
         val on = TaskInfo::class.java.getField("displayId")
-        tasks.filter { on.getInt(it) == displayId }.forEach { moveToDisplay(it.taskId, 0) }
+        tasks().filter { on.getInt(it) == displayId }.forEach { runCatching { moveToDisplay(it, 0) } }
     }
 
-    private val events = object : VirtualDisplay.Callback() {
+    /** One per screen, so a late stop of an old one cannot drop the current one. */
+    private inner class Events : VirtualDisplay.Callback() {
+        /** Set while [create] still holds the lock, before any event can be handled. */
+        @Volatile var of: VirtualDisplay? = null
+
         // Whether it pauses with the phone locked is the thing to find out on the road.
         override fun onPaused() = say("la pantalla de la moto se pausa (¿móvil bloqueado?)")
         override fun onResumed() = say("la pantalla de la moto sigue")
-        override fun onStopped() = say("Android ha quitado la pantalla de la moto")
+        override fun onStopped() {
+            say("Android ha quitado la pantalla de la moto")
+            // Comes on [handler]; the next show() then makes a new one instead of reusing it.
+            synchronized(this@DisplayService) {
+                if (of != null && display === of) release()
+            }
+        }
     }
 
     /**
@@ -252,27 +290,53 @@ class DisplayService() : IBikeDisplay.Stub() {
      */
     @SuppressLint("PrivateApi")
     private fun moveTask(packageName: String, displayId: Int): String? {
-        val atm = Class.forName("android.app.ActivityTaskManager")
-        val instance = atm.getMethod("getInstance").invoke(null)
-        @Suppress("UNCHECKED_CAST")
-        val tasks = atm.getMethod("getTasks", Int::class.javaPrimitiveType).invoke(instance, 100)
-            as List<ActivityManager.RunningTaskInfo>
-        val task = tasks.firstOrNull {
+        val task = tasks().firstOrNull {
             it.baseActivity?.packageName == packageName || it.topActivity?.packageName == packageName
         } ?: return null
-        moveToDisplay(task.taskId, displayId)
+        try {
+            moveToDisplay(task, displayId)
+        } catch (e: Throwable) {
+            say("no se pudo mover la tarea ${task.taskId} de $packageName (${e.cause ?: e}): se abre de nuevo")
+            return null
+        }
         return "movida la tarea ${task.taskId} de $packageName a la pantalla $displayId"
     }
 
+    /**
+     * The tasks open now. ActivityTaskManager.getInstance() only came with Android 11; on 10
+     * they are asked of its service, or of the activity manager's.
+     */
     @SuppressLint("PrivateApi")
-    private fun moveToDisplay(taskId: Int, displayId: Int) {
+    @Suppress("UNCHECKED_CAST")
+    private fun tasks(): List<ActivityManager.RunningTaskInfo> {
+        val atm = Class.forName("android.app.ActivityTaskManager")
+        val int = Int::class.javaPrimitiveType
+        if (Build.VERSION.SDK_INT >= 30) {
+            val instance = atm.getMethod("getInstance").invoke(null)
+            return atm.getMethod("getTasks", int).invoke(instance, 100) as List<ActivityManager.RunningTaskInfo>
+        }
+        return runCatching {
+            val service = atm.getMethod("getService").invoke(null)!!
+            service.javaClass.getMethod("getTasks", int).invoke(service, 100) as List<ActivityManager.RunningTaskInfo>
+        }.getOrElse {
+            val service = Class.forName("android.app.ActivityManager").getMethod("getService").invoke(null)!!
+            service.javaClass.getMethod("getTasks", int).invoke(service, 100) as List<ActivityManager.RunningTaskInfo>
+        }
+    }
+
+    @SuppressLint("PrivateApi")
+    private fun moveToDisplay(task: TaskInfo, displayId: Int) {
         val atm = Class.forName("android.app.ActivityTaskManager")
         val service = atm.getMethod("getService").invoke(null)!!
         // Android 12 calls it moveRootTaskToDisplay; 10 and 11, moveStackToDisplay.
         val move = service.javaClass.methods.first {
             (it.name == "moveRootTaskToDisplay" || it.name == "moveStackToDisplay") && it.parameterCount == 2
         }
-        move.invoke(service, taskId, displayId)
+        // Android 10 moves a stack, which has an id of its own; from 11 a root task's id is the task's.
+        val id = if (Build.VERSION.SDK_INT == 29) {
+            runCatching { TaskInfo::class.java.getField("stackId").getInt(task) }.getOrDefault(task.taskId)
+        } else task.taskId
+        move.invoke(service, id, displayId)
     }
 
     /**
@@ -294,7 +358,8 @@ class DisplayService() : IBikeDisplay.Stub() {
         return at.getMethod("getSystemContext").invoke(current) as Context
     }
 
-    private fun run(vararg command: String): String = output(*command).replace(Regex("\\s+"), " ").take(300)
+    private fun run(vararg command: String): String = tidy(output(*command))
+    private fun tidy(text: String) = text.replace(Regex("\\s+"), " ").take(300)
 
     private fun output(vararg command: String): String = try {
         val process = ProcessBuilder(*command).redirectErrorStream(true).start()

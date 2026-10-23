@@ -7,6 +7,7 @@ import android.os.Build
 import android.os.IBinder
 import android.os.Bundle
 import android.os.Looper
+import android.os.SystemClock
 import android.system.Os
 import java.io.File
 import kotlin.concurrent.thread
@@ -50,17 +51,21 @@ object ShellMain {
     }
 
     /**
-     * Looks every second for the app's process, without starting it, and attaches again once
-     * it is there. Ends if the app was reinstalled (this code is then stale) or if the app keeps
+     * Looks for the app's process, without starting it, and attaches again once it is there:
+     * every second for the first five minutes, then every five seconds, until the phone
+     * restarts. Ends if the app was reinstalled (this code is then stale) or if the app keeps
      * refusing, which happens when it has started a worker of its own.
      */
     private fun waitForApp(service: DisplayService, nonce: String, userId: Int) {
         val apk = System.getenv("CLASSPATH")
         var refused = 0
+        val since = SystemClock.elapsedRealtime()
         while (true) {
-            Thread.sleep(1000)
+            Thread.sleep(if (SystemClock.elapsedRealtime() - since < 5 * 60_000) 1000 else 5000)
             if (apk != null && !File(apk).exists()) {
                 android.util.Log.i(TAG, "La app se ha reinstalado o borrado: termina")
+                // Updated, the next worker may be about to use the pairing; uninstalled, nobody will.
+                if (!installed()) service.forgetPairing()
                 exitProcess(0)
             }
             if (!appRunning(service.owner)) continue
@@ -73,6 +78,13 @@ object ShellMain {
             }
         }
     }
+
+    private fun installed(): Boolean = runCatching {
+        val pm = ProcessBuilder("pm", "path", "com.motocom").redirectErrorStream(true).start()
+        val said = pm.inputStream.bufferedReader().readText()
+        pm.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)
+        said.contains("package:")
+    }.getOrDefault(true)
 
     /** /proc/<pid> belongs to the uid that runs it; the shell may see every process. */
     private fun appRunning(uid: Int): Boolean =

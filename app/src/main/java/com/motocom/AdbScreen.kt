@@ -30,6 +30,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -60,6 +61,7 @@ fun AdbScreen(onBack: () -> Unit, openDeveloperOptions: () -> Unit) {
     val busy by ShellLink.busy
     val paired by ShellLink.paired
     val message by ShellLink.message
+    val justPaired by ShellLink.justPaired
     var manual by rememberSaveable { mutableStateOf(false) }
 
     Column(Modifier.fillMaxSize()) {
@@ -72,6 +74,7 @@ fun AdbScreen(onBack: () -> Unit, openDeveloperOptions: () -> Unit) {
                 ready -> StatusPanel(Tone.GOOD, "ADB activo", "Sigue en marcha hasta que reinicies el móvil.", Icons.Check)
                 busy -> StatusPanel(Tone.NEUTRAL, "Preparando ADB…", message, Icons.Code, working = true)
                 message.startsWith("Error") -> StatusPanel(Tone.BAD, "No se ha podido iniciar", message.removePrefix("Error ADB: "), Icons.Warning)
+                justPaired -> StatusPanel(Tone.GOOD, "Emparejado", "Falta el paso 2: copia el puerto de conexión y pulsa Iniciar ADB.", Icons.Check)
                 paired -> StatusPanel(Tone.NEUTRAL, "ADB parado", "Ya está emparejado: basta con pulsar Iniciar ADB, o Conectar en la pantalla principal.", Icons.Code)
                 else -> StatusPanel(Tone.WARN, "Sin configurar", "Motocom necesita ADB para crear la pantalla de la moto. Solo hay que emparejar la primera vez.", Icons.Code)
             }
@@ -119,6 +122,9 @@ private fun ManualSetup(busy: Boolean, openDeveloperOptions: () -> Unit) {
     var connectionPort by rememberSaveable { mutableStateOf("") }
     // The one-time code is deliberately not persisted across recreation.
     var code by remember { mutableStateOf("") }
+    // Used up once it has paired; kept after a failure, to see what was typed.
+    val justPaired by ShellLink.justPaired
+    LaunchedEffect(justPaired) { if (justPaired) code = "" }
     val numbers = KeyboardOptions(keyboardType = KeyboardType.Number)
 
     Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
@@ -130,7 +136,7 @@ private fun ManualSetup(busy: Boolean, openDeveloperOptions: () -> Unit) {
         if (Build.VERSION.SDK_INT >= 30) {
             Step(1, "Emparejar", "En Depuración inalámbrica, toca «Vincular dispositivo con código» y copia aquí su puerto y su código. Usa pantalla dividida para no cerrar ese diálogo.") {
                 OutlinedTextField(
-                    pairingPort, { pairingPort = it.filter(Char::isDigit).take(5) },
+                    pairingPort, { pairingPort = portOf(it) },
                     label = { Text("Puerto de emparejamiento") }, enabled = !busy, singleLine = true,
                     keyboardOptions = numbers, modifier = Modifier.fillMaxWidth()
                 )
@@ -140,7 +146,7 @@ private fun ManualSetup(busy: Boolean, openDeveloperOptions: () -> Unit) {
                     keyboardOptions = numbers, modifier = Modifier.fillMaxWidth()
                 )
                 OutlinedButton(
-                    onClick = { ShellLink.pair(pairingPort, code); code = "" },
+                    onClick = { ShellLink.pair(pairingPort, code) },
                     enabled = !busy && pairingPort.isNotBlank() && code.length == 6,
                     modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp)
                 ) { Text("Emparejar") }
@@ -159,7 +165,7 @@ private fun ManualSetup(busy: Boolean, openDeveloperOptions: () -> Unit) {
 @Composable
 private fun ConnectionPort(port: String, onPort: (String) -> Unit, busy: Boolean, numbers: KeyboardOptions) {
     OutlinedTextField(
-        port, { onPort(it.filter(Char::isDigit).take(5)) },
+        port, { onPort(portOf(it)) },
         label = { Text("Puerto de conexión") }, enabled = !busy, singleLine = true,
         keyboardOptions = numbers, modifier = Modifier.fillMaxWidth()
     )
@@ -167,6 +173,13 @@ private fun ConnectionPort(port: String, onPort: (String) -> Unit, busy: Boolean
         onClick = { ShellLink.start(port) }, enabled = !busy && port.isNotBlank(),
         modifier = Modifier.fillMaxWidth().height(52.dp), shape = RoundedCornerShape(16.dp)
     ) { Text(if (busy) "Preparando…" else "Iniciar ADB") }
+}
+
+/** Android shows "192.168.1.20:37123"; pasted whole, only the port after the colon is kept. */
+private fun portOf(typed: String): String {
+    // An address without its port has none to give.
+    if ('.' in typed && ':' !in typed) return ""
+    return typed.substringAfterLast(':').filter(Char::isDigit).take(5)
 }
 
 @Composable
@@ -218,7 +231,8 @@ private const val ENABLE_HELP =
     "1. Conecta el móvil a un wifi.\n" +
         "2. En Ajustes → Acerca del teléfono, toca 7 veces «Número de compilación» para activar las Opciones de desarrollador.\n" +
         "3. En Opciones de desarrollador, activa «Depuración inalámbrica» y acepta la red.\n" +
-        "4. Para que Android no olvide la autorización, activa también «Desactivar el tiempo de espera de autorización de ADB»."
+        "4. Para que Android no olvide la autorización, activa también «Desactivar el tiempo de espera de autorización de ADB».\n" +
+        "5. En Xiaomi, Redmi o POCO, activa también «Depuración USB (ajustes de seguridad)»: sin ella Motocom no puede encender sola la depuración inalámbrica."
 
 private const val SPLIT_HELP =
     "• Abre Motocom y después Ajustes → Opciones de desarrollador → Depuración inalámbrica. Aún no abras el código.\n" +

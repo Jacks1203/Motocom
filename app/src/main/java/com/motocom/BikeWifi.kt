@@ -43,7 +43,12 @@ class BikeWifi(
     private var asked = false
     private var joined = false
     private var triedPassword = false
+    /** Once the phone has asked to get in, a group it ends up running is one it made by asking. */
+    private var askedOnce = false
     private var lastSeen = ""
+    private var otherGroup = ""
+    /** The last failure of each quiet call, so that the same one is said once and not every 30 s. */
+    private val failures = mutableMapOf<String, Int>()
     private val main = Handler(Looper.getMainLooper())
 
     /**
@@ -54,16 +59,26 @@ class BikeWifi(
         val wifi = manager
         val on = channel
         val known = bike
-        if (joined || triedPassword || wifi == null || on == null || known == null) return@Runnable
-        if (known.password.length < 8 || Build.VERSION.SDK_INT < 29) {
-            log("sigue fuera del wifi de la moto, y no hay contraseña que probar en este móvil")
+        if (!listening || joined || triedPassword || wifi == null || on == null || known == null) return@Runnable
+        // Android throws rather than refuse when the name or the password are not to its liking.
+        val wrong = when {
+            Build.VERSION.SDK_INT < 29 -> "este móvil no lo permite"
+            !known.ssid.matches(Regex("DIRECT-[a-zA-Z0-9]{2}.*")) -> "el nombre ${known.ssid} no empieza por DIRECT- y dos letras"
+            known.ssid.toByteArray(Charsets.UTF_8).size > 32 -> "el nombre ${known.ssid} es demasiado largo"
+            known.password.length !in 8..63 -> "la contraseña del QR no tiene entre 8 y 63 caracteres"
+            else -> null
+        }
+        if (wrong != null) {
+            log("sigue fuera del wifi de la moto, y no se puede probar la contraseña: $wrong")
             return@Runnable
         }
         triedPassword = true
         log("sigue fuera tras ${PASSWORD_AFTER_MS / 1000} s: entrando a ${known.ssid} con la contraseña del QR")
-        val config = WifiP2pConfig.Builder().setNetworkName(known.ssid).setPassphrase(known.password).build()
-        wifi.cancelConnect(on, null)
-        wifi.connect(on, config, result("entrar con la contraseña"))
+        runCatching {
+            val config = WifiP2pConfig.Builder().setNetworkName(known.ssid).setPassphrase(known.password).build()
+            wifi.cancelConnect(on, null)
+            wifi.connect(on, config, result("entrar con la contraseña"))
+        }.onFailure { log("entrar con la contraseña: no se pudo (${it.message ?: it})") }
     }
 
     /**
@@ -73,9 +88,10 @@ class BikeWifi(
     private val keepLooking = object : Runnable {
         override fun run() {
             if (!listening) return
-            if (!joined) {
+            val on = channel
+            if (!joined && on != null) {
                 asked = false
-                manager?.discoverPeers(channel, result("buscar aparatos por wifi directo", quiet = true))
+                runCatching { manager?.discoverPeers(on, result("buscar aparatos por wifi directo", quiet = true)) }
             }
             main.postDelayed(this, LOOK_AGAIN_MS)
         }
@@ -92,11 +108,18 @@ class BikeWifi(
 
     fun start() {
         val wifi = manager ?: return log("este móvil no tiene wifi directo")
-        channel = wifi.initialize(context, context.mainLooper, null)
+        val on = wifi.initialize(context, context.mainLooper) {
+            // The system dropped the app's line to wifi direct; calls on it will fail from now on.
+            if (listening) log("el sistema ha cortado el wifi directo de la app")
+        } ?: return log("no se pudo abrir el wifi directo")
+        channel = on
         asked = false
+        askedOnce = false
         joined = false
         triedPassword = false
         lastSeen = ""
+        otherGroup = ""
+        failures.clear()
         log(if (bike != null) "buscando la moto del QR: ${bike.name}" else "sin QR leído: buscando un aparato que empiece por $DEFAULT_PREFIX")
         main.postDelayed(usePassword, PASSWORD_AFTER_MS)
         ContextCompat.registerReceiver(
@@ -110,7 +133,7 @@ class BikeWifi(
         listening = true
         // The phone may still be in the bike's group from the last time.
         lookAtGroup()
-        wifi.discoverPeers(channel, result("buscar aparatos por wifi directo"))
+        wifi.discoverPeers(on, result("buscar aparatos por wifi directo"))
         main.postDelayed(keepLooking, LOOK_AGAIN_MS)
     }
 
@@ -122,17 +145,23 @@ class BikeWifi(
         val wifi = manager ?: return
         val on = channel ?: return
         runCatching { wifi.stopPeerDiscovery(on, null) }
+        // Only the bike's group: another one the phone is in is none of this app's business.
         if (joined) runCatching { wifi.removeGroup(on, null) }
         joined = false
         channel = null
+        runCatching { on.close() }
     }
 
     private fun lookAtPeers() {
-        if (asked || joined) return
-        manager?.requestPeers(channel) { peers ->
-            if (asked || joined) return@requestPeers
-            val names = peers.deviceList.joinToString { it.deviceName.orEmpty() }
-            val found = peers.deviceList.firstOrNull {
+        if (!listening || asked || joined) return
+        val wifi = manager ?: return
+        // The answer may come after stop(): it has to use the channel it was asked on, if still open.
+        val on = channel ?: return
+        wifi.requestPeers(on) { peers ->
+            if (!listening || on !== channel || asked || joined) return@requestPeers
+            val devices = peers?.deviceList.orEmpty()
+            val names = devices.joinToString { it.deviceName.orEmpty() }
+            val found = devices.firstOrNull {
                 val name = it.deviceName.orEmpty()
                 if (bike != null) name == bike.name else name.startsWith(DEFAULT_PREFIX)
             }
@@ -144,18 +173,28 @@ class BikeWifi(
             }
             log("moto a la vista: ${found.deviceName} (${status(found.status)})")
             asked = true
+            askedOnce = true
             val config = WifiP2pConfig().apply {
                 deviceAddress = found.deviceAddress
                 wps.setup = WpsInfo.PBC
                 groupOwnerIntent = 0 // the bike runs the group
             }
-            manager.connect(channel, config, result("pedir entrar en el wifi de la moto", onFailure = { asked = false }))
+            runCatching {
+                wifi.connect(on, config, result("pedir entrar en el wifi de la moto", onFailure = { asked = false }))
+            }.onFailure {
+                asked = false
+                log("pedir entrar en el wifi de la moto: no se pudo (${it.message ?: it})")
+            }
         }
     }
 
     private fun lookAtGroup() {
-        manager?.requestConnectionInfo(channel) { info: WifiP2pInfo? ->
+        val wifi = manager ?: return
+        val on = channel ?: return
+        wifi.requestConnectionInfo(on) { info: WifiP2pInfo? ->
+            if (!listening || on !== channel) return@requestConnectionInfo
             if (info == null || !info.groupFormed) {
+                otherGroup = ""
                 if (joined) {
                     log("fuera del wifi de la moto")
                     joined = false
@@ -165,17 +204,52 @@ class BikeWifi(
             }
             if (joined) return@requestConnectionInfo
             if (info.isGroupOwner) {
-                log("el móvil ha quedado de jefe del grupo: así no se sabe la dirección de la moto")
+                if (askedOnce) {
+                    // Asking to get in made a group of the phone's own instead of joining the
+                    // bike's, and there the bike's address is not known: undo it and look again.
+                    log("el móvil ha quedado de jefe del grupo: se deshace y se sigue buscando")
+                    runCatching { wifi.removeGroup(on, null) }
+                    asked = false
+                } else {
+                    sayOtherGroup("uno en el que el móvil es el jefe")
+                }
                 return@requestConnectionInfo
             }
             val owner = info.groupOwnerAddress ?: return@requestConnectionInfo
-            joined = true
-            main.removeCallbacks(usePassword)
-            runCatching { manager?.stopPeerDiscovery(channel, null) }
-            val phone = ownAddressNear(owner)
-            log("dentro del wifi de la moto: ella ${owner.hostAddress}, el móvil ${phone?.hostAddress ?: "?"}")
-            onJoined(owner, phone)
+            wifi.requestGroupInfo(on) { group ->
+                if (!listening || on !== channel || joined) return@requestGroupInfo
+                // Some phones give no group here even with one formed; without a name, it is
+                // taken for the bike's as it always was.
+                val name = group?.networkName.orEmpty()
+                if (name.isNotEmpty() && !isBikes(name, group?.owner?.deviceName)) {
+                    return@requestGroupInfo sayOtherGroup(if (bike != null) "$name (se esperaba ${bike.ssid})" else name)
+                }
+                joined = true
+                otherGroup = ""
+                main.removeCallbacks(usePassword)
+                runCatching { wifi.stopPeerDiscovery(on, null) }
+                val phone = ownAddressNear(owner)
+                log("dentro del wifi de la moto: ella ${owner.hostAddress}, el móvil ${phone?.hostAddress ?: "?"}")
+                onJoined(owner, phone)
+            }
         }
+    }
+
+    /**
+     * The QR's network if there is one; otherwise one named like the bikes seen so far. Loose
+     * on purpose: what Android reports for the bike's group has not been seen yet, and being
+     * wrong here would keep the phone in the bike's wifi doing nothing.
+     */
+    private fun isBikes(network: String, ownerName: String?): Boolean {
+        if (bike == null) return network.substringAfter("DIRECT-", "").contains(DEFAULT_PREFIX, ignoreCase = true)
+        return network.equals(bike.ssid, ignoreCase = true) ||
+            network.endsWith(bike.name, ignoreCase = true) ||
+            ownerName.equals(bike.name, ignoreCase = true)
+    }
+
+    private fun sayOtherGroup(name: String) {
+        if (name != otherGroup) log("el móvil está en otro wifi directo: $name")
+        otherGroup = name
     }
 
     /** The phone's address on the same /24 as the bike. */
@@ -189,14 +263,18 @@ class BikeWifi(
     }
 
     private fun result(what: String, quiet: Boolean = false, onFailure: () -> Unit = {}) = object : WifiP2pManager.ActionListener {
-        override fun onSuccess() { if (!quiet) log("$what: en marcha") }
+        override fun onSuccess() {
+            failures.remove(what)
+            if (!quiet) log("$what: en marcha")
+        }
         override fun onFailure(reason: Int) {
             val why = when (reason) {
                 WifiP2pManager.P2P_UNSUPPORTED -> "este móvil no lo admite"
                 WifiP2pManager.BUSY -> "el wifi está ocupado; ¿wifi y ubicación encendidos?"
                 else -> "error $reason; ¿wifi y ubicación encendidos?"
             }
-            log("$what: no se pudo ($why)")
+            if (!quiet || failures[what] != reason) log("$what: no se pudo ($why)")
+            failures[what] = reason
             onFailure()
         }
     }

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Hace de moto contra el móvil, por el cable, para probar la pantalla de la moto sin la moto.
 
-En el móvil: Ajustes > Modo moto > Con Carbit Ride > Conectar. Después, aquí:
+En el móvil: Motocom compilada en debug o con -PcableTests=true (si no, sus puertos solo
+aceptan a la moto), y Conectar. Después, aquí:
 
     for p in 10920 10921 10922; do adb forward tcp:$((p+10000)) tcp:$p; done
     python3 herramientas/moto_falsa.py salida.h264 [segundos, 4 si no se dice]
@@ -9,7 +10,7 @@ En el móvil: Ajustes > Modo moto > Con Carbit Ride > Conectar. Después, aquí:
 
 Dice lo que dijo la moto de verdad el 30-09-2026 y guarda el vídeo que manda el móvil.
 """
-import socket, struct, json, time, sys
+import socket, struct, json, time, sys, select
 def con(p):
     s=socket.create_connection(("127.0.0.1",10000+p)); s.settimeout(5); return s
 def rd(s,n):
@@ -47,5 +48,8 @@ while time.time()-t0<dura:
     rv_w(d,0x72); l=struct.unpack("<i",rd(d,4))[0]
     if l: out.write(rd(d,l)); n+=1; sizes.append(l)
     else: z+=1
-    if int(time.time()-t0)!=int(time.time()-t0-0.03): rv_w(k,0x40); rv_r(k); pxc_w(a,0x70000000); pxc_r(a)
+    if int(time.time()-t0)!=int(time.time()-t0-0.03):
+        rv_w(k,0x40); rv_r(k); pxc_w(a,0x70000000); pxc_r(a)
+        # El móvil pregunta cada segundo: contestar para que no dé la moto por muerta.
+        while select.select([p],[],[],0)[0]: c,b=pxc_r(p); pxc_w(p,c+1)
 print("tramas",n,"vacias",z,"primeras",sizes[:8])

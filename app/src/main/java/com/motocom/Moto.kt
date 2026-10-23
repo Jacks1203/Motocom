@@ -49,6 +49,9 @@ class Moto private constructor(private val context: Context) {
     val state = mutableStateOf(BikeState.CLOSED)
     val running = mutableStateOf(false)
 
+    /** Where the chosen app is while running: on the bike, brought to the phone, or neither yet. */
+    val appPlace = mutableStateOf(AppPlace.NOWHERE)
+
     private val prefs = context.getSharedPreferences("motocom_moto", Context.MODE_PRIVATE)
 
     /** Package of the app that goes to the bike. */
@@ -69,10 +72,15 @@ class Moto private constructor(private val context: Context) {
     val waitingForAdb = mutableStateOf(false)
 
     init {
-        runCatching { if (file.exists()) lines += file.readLines().takeLast(200) }
+        // Reading up to a megabyte is no work for the main thread.
+        thread(isDaemon = true) {
+            val old = synchronized(file) { runCatching { if (file.exists()) file.readLines().takeLast(200) else null }.getOrNull() }
+            if (old != null) main.post { lines.addAll(0, old) }
+        }
         ShellLink.onReady = {
             if (waitingForAdb.value) {
                 waitingForAdb.value = false
+                main.removeCallbacks(adbTooSlow)
                 log("ADB ya está en marcha: conectando")
                 start()
             }
@@ -92,46 +100,102 @@ class Moto private constructor(private val context: Context) {
      * ADB is up the user is in ADB.
      */
     fun connect() {
-        if (running.value) return
+        if (running.value || waitingForAdb.value) return
+        whyNot()?.let {
+            log("no se conecta: $it")
+            toast(it)
+            return
+        }
         ShellLink.refresh()
-        if (ShellLink.status.value == ShellLink.Status.READY) {
+        if (ShellLink.ready) {
             start()
             return
         }
         waitingForAdb.value = true
         BikeService.start(context)
+        main.postDelayed(adbTooSlow, WAIT_ADB_MS)
         log("esperando a que ADB esté en marcha para conectar")
         if (ShellLink.paired.value) ShellLink.quickStart()
+    }
+
+    /** What keeps the bike from being found before even trying, said so it can be put right. */
+    private fun whyNot(): String? {
+        val wifi = context.getSystemService(Context.WIFI_SERVICE) as WifiManager?
+        if (wifi?.isWifiEnabled != true) return "Enciende el wifi del móvil: la moto se conecta por wifi directo."
+        // Before Android 13, looking for wifi devices needs the location on.
+        if (Build.VERSION.SDK_INT < 33) {
+            val location = context.getSystemService(Context.LOCATION_SERVICE) as LocationManager?
+            if (location == null || !LocationManagerCompat.isLocationEnabled(location)) {
+                return "Enciende la ubicación: en este Android hace falta para encontrar la moto."
+            }
+        }
+        if (chosenComponent() == null) return "La app elegida ya no está instalada. Elige otra."
+        return null
+    }
+
+    /** ADB never came up: the phone is not kept awake for nothing. */
+    private val adbTooSlow = Runnable {
+        if (!waitingForAdb.value) return@Runnable
+        log("ADB no se ha puesto en marcha en ${WAIT_ADB_MS / 60_000} min: se deja de esperar")
+        toast("ADB no arranca: se deja de esperar. Revisa la pantalla ADB.")
+        cancelWaiting()
     }
 
     fun cancelWaiting() {
         if (!waitingForAdb.value) return
         waitingForAdb.value = false
+        main.removeCallbacks(adbTooSlow)
         if (!running.value) BikeService.stop(context)
     }
 
-    private var link: BikeLink? = null
+    @Volatile private var link: BikeLink? = null
+    private var linkEvents: LinkEvents? = null
     private var wifi: BikeWifi? = null
+
+    /** Where the bike and the phone are on the bike's wifi, once in it; kept to call again. */
+    @Volatile private var bikeAddress: InetAddress? = null
+    private var phoneAddress: InetAddress? = null
 
     /** One for the whole run, so the app stays on the bike's screen between attempts. */
     private var picture: MirrorPicture? = null
 
-    /** What has to be granted before [start]. */
+    /** What is asked for before [connect]: the wifi-direct one, and notifications, which are optional. */
     val permissions: Array<String>
         get() = buildList {
-            add(Manifest.permission.ACCESS_FINE_LOCATION)
             if (Build.VERSION.SDK_INT >= 33) {
                 add(Manifest.permission.NEARBY_WIFI_DEVICES)
                 add(Manifest.permission.POST_NOTIFICATIONS)
+            } else {
+                // Asked together, as Android 12 wants; only the fine one finds wifi devices.
+                add(Manifest.permission.ACCESS_FINE_LOCATION)
+                add(Manifest.permission.ACCESS_COARSE_LOCATION)
             }
         }.toTypedArray()
 
+    /**
+     * What has to be granted for the bike to be found. Since Android 13 that is only nearby
+     * devices, declared as not for location; notifications only hide the service's notice.
+     */
+    private val required: List<String>
+        get() = if (Build.VERSION.SDK_INT >= 33) listOf(Manifest.permission.NEARBY_WIFI_DEVICES)
+            else listOf(Manifest.permission.ACCESS_FINE_LOCATION)
+
     fun missingPermissions() =
-        permissions.filter { ContextCompat.checkSelfPermission(context, it) != PackageManager.PERMISSION_GRANTED }
+        required.filter { ContextCompat.checkSelfPermission(context, it) != PackageManager.PERMISSION_GRANTED }
 
     fun choose(packageName: String) {
         prefs.edit().putString(KEY_APP, packageName).apply()
         chosenApp.value = packageName
+    }
+
+    /** The chosen app is gone (uninstalled or disabled): forget it rather than show its package. */
+    fun forgetMissingApp(): Boolean {
+        val pkg = chosenApp.value ?: return false
+        if (context.packageManager.getLaunchIntentForPackage(pkg) != null) return false
+        log("la app elegida ($pkg) ya no se puede abrir: se olvida")
+        prefs.edit().remove(KEY_APP).apply()
+        chosenApp.value = null
+        return true
     }
 
     /** Takes what the camera read off the bike's screen. False if it is not a bike's code. */
@@ -161,10 +225,15 @@ class Moto private constructor(private val context: Context) {
 
     fun start() {
         if (running.value) return
-        lines.clear()
         running.value = true
+        appPlace.value = AppPlace.NOWHERE
         ShellLink.bind()
-        picture = MirrorPicture(::log, ::chosenComponent) { dpi.intValue }
+        var made: MirrorPicture? = null
+        made = MirrorPicture(::log, ::chosenComponent, { dpi.intValue }) { place ->
+            // A picture let go of says so late; only the current one speaks for the run.
+            main.post { if (running.value && picture === made) appPlace.value = place }
+        }
+        picture = made
         BikeService.start(context)
         giveUpIn(SEARCH_MS)
         attempt()
@@ -187,9 +256,23 @@ class Moto private constructor(private val context: Context) {
 
     /** One go at the bike, from finding it to showing it; another when it goes and comes back. */
     private fun attempt() {
-        runCatching { if (file.length() > MAX_BYTES) file.writeText(file.readText().takeLast(MAX_BYTES / 2)) }
+        synchronized(file) {
+            runCatching { if (file.length() > MAX_BYTES) file.writeText(file.readText().takeLast(MAX_BYTES / 2)) }
+        }
         header()
+        bikeAddress = null
+        phoneAddress = null
+        if (!openLink()) return
+        log("escuchando en 10920, 10921 y 10922")
+        wifi = BikeWifi(
+            context, ::log, bike.value,
+            onJoined = { bike, phone -> joined(bike, phone) },
+            onLeft = { bikeLeft() }
+        ).also { it.start() }
+    }
 
+    /** Opens the phone's ports for the bike. False, and everything stopped, if they are taken. */
+    private fun openLink(): Boolean {
         val keys = BikeKeys(context)
         val metrics = context.resources.displayMetrics
         // Carbit Ride's name, which is the one the bike is known to take.
@@ -204,59 +287,105 @@ class Moto private constructor(private val context: Context) {
             publicKey = keys.publicKey,
             sign = keys::sign
         )
-        val events = object : BikeEvents {
-            override fun log(line: String) = this@Moto.log(line)
-            override fun state(state: BikeState) {
-                main.post {
-                    if (state == BikeState.SHOWING && this@Moto.state.value != BikeState.SHOWING) {
-                        main.removeCallbacks(giveUp)
-                        toast("Conectado: la app está en la moto.")
-                    }
-                    this@Moto.state.value = state
-                }
-            }
-        }
-        val opened = BikeLink(card, picture ?: return, events)
+        val shown = picture ?: return false
+        val events = LinkEvents()
+        // Only the bike may talk to these ports, not whoever shares a café's wifi with the
+        // phone; a test build also lets in the cable, for codigo/moto_falsa.py.
+        val opened = BikeLink(card, shown, events, allow = { from ->
+            from == bikeAddress || (BuildConfig.CABLE_TESTS && from.isLoopbackAddress)
+        })
+        events.link = opened
         try {
             opened.open()
         } catch (e: IOException) {
             // Carbit and OffNavigator listen on the very same ports, and only one can have them.
             log("no se pueden abrir los puertos (${e.message}). Si Carbit u OffNavigator están abiertos, ciérralos del todo y vuelve a probar.")
             toast("Puertos ocupados: cierra Carbit u OffNavigator del todo.")
-            opened.close()
+            events.retired = true
+            thread(isDaemon = true) { opened.close() }
             stop()
-            return
+            return false
         }
         link = opened
-        log("escuchando en 10920, 10921 y 10922")
-        wifi = BikeWifi(
-            context, ::log, bike.value,
-            onJoined = { bike, phone -> knockUntilHeard(opened, bike, phone) },
-            onLeft = { bikeLeft(opened) }
-        ).also { it.start() }
+        linkEvents = events
+        return true
+    }
+
+    /** What one link says, heeded only while it is the current one. */
+    private inner class LinkEvents : BikeEvents {
+        @Volatile var retired = false
+        var link: BikeLink? = null
+
+        override fun log(line: String) = this@Moto.log(line)
+
+        override fun state(state: BikeState) {
+            main.post {
+                if (retired || !running.value) return@post
+                if (state == BikeState.SHOWING && this@Moto.state.value != BikeState.SHOWING) {
+                    main.removeCallbacks(giveUp)
+                    toast("Conectado: la app está en la moto.")
+                }
+                this@Moto.state.value = state
+            }
+        }
+
+        override fun gone(why: String) {
+            main.post { link?.let { if (!retired) relink(it, why) } }
+        }
+    }
+
+    private fun joined(bike: InetAddress, phone: InetAddress?) {
+        bikeAddress = bike
+        phoneAddress = phone
+        link?.let { knockUntilHeard(it, bike, phone) }
     }
 
     /**
      * The bike's wifi went away, as when it is switched off at a stop. Start over and keep
      * looking, so switching it on again is all it takes. The app stays on the bike's screen.
      */
-    private fun bikeLeft(from: BikeLink) {
-        if (link !== from) return
+    private fun bikeLeft() {
+        if (!running.value) return
         log("la moto se ha ido (¿apagada?): se la vuelve a buscar")
         toast("La moto se ha desconectado. Si vuelve en ${AFTER_LEFT_MS / 60_000} min, se conecta sola.")
         giveUpIn(AFTER_LEFT_MS)
         closeAttempt()
         state.value = BikeState.LISTENING
-        main.postDelayed({ if (running.value && link == null) attempt() }, RETRY_MS)
+        main.postDelayed({ if (running.value && link == null && wifi == null) attempt() }, RETRY_MS)
+    }
+
+    /**
+     * The bike stopped talking with its wifi still up, as when its screen starts its session
+     * over. The wifi stays; the ports open afresh and the bike is called again.
+     */
+    private fun relink(from: BikeLink, why: String) {
+        if (!running.value || link !== from) return
+        log("la moto ha dejado de hablar ($why): se la vuelve a llamar")
+        giveUpIn(AFTER_LEFT_MS)
+        retireLink()
+        state.value = BikeState.LISTENING
+        main.postDelayed({
+            if (!running.value || link != null || wifi == null) return@postDelayed
+            if (!openLink()) return@postDelayed
+            val bike = bikeAddress ?: return@postDelayed
+            link?.let { knockUntilHeard(it, bike, phoneAddress) }
+        }, RETRY_MS)
+    }
+
+    private fun retireLink() {
+        linkEvents?.retired = true
+        linkEvents = null
+        val closing = link
+        link = null
+        // Closing sockets is network work, which Android does not allow on the main thread.
+        thread(isDaemon = true) { closing?.close() }
     }
 
     private fun closeAttempt() {
         wifi?.stop()
         wifi = null
-        val closing = link
-        link = null
-        // Closing sockets is network work, which Android does not allow on the main thread.
-        thread(isDaemon = true) { closing?.close() }
+        bikeAddress = null
+        retireLink()
     }
 
     fun stop() {
@@ -271,18 +400,17 @@ class Moto private constructor(private val context: Context) {
         thread(isDaemon = true) { done?.release() }
         BikeService.stop(context)
         state.value = BikeState.CLOSED
+        appPlace.value = AppPlace.NOWHERE
         log("parado")
     }
 
-    /** The bike's screen is up, so the app can be taken back and forth. */
-    val canMove: Boolean get() = (picture?.displayId ?: -1) >= 0
-
     /** The app to the phone, to type a destination; [toBike] sends it back. */
-    fun toPhone() = thread(isDaemon = true) { picture?.bringApp(0) }
+    fun toPhone() {
+        picture?.toPhone()
+    }
 
-    fun toBike() = thread(isDaemon = true) {
-        val shown = picture ?: return@thread
-        if (shown.displayId >= 0) shown.bringApp(shown.displayId)
+    fun toBike() {
+        picture?.toBike()
     }
 
     /** Sends the whole record, every attempt in it, through WhatsApp, mail, Drive... */
@@ -295,7 +423,7 @@ class Moto private constructor(private val context: Context) {
             val exports = File(activity.cacheDir, "exports").apply { mkdirs() }
             exports.listFiles()?.forEach { it.delete() }
             val name = "registro-moto-${SimpleDateFormat("yyyyMMdd-HHmm", Locale.US).format(Date())}.txt"
-            val out = File(exports, name).apply { writeBytes(file.readBytes()) }
+            val out = File(exports, name).apply { writeBytes(synchronized(file) { file.readBytes() }) }
             val uri = FileProvider.getUriForFile(activity, "${activity.packageName}.fileprovider", out)
             val send = Intent(Intent.ACTION_SEND).apply {
                 type = "text/plain"
@@ -314,30 +442,35 @@ class Moto private constructor(private val context: Context) {
     private fun header() {
         val wifi = context.getSystemService(Context.WIFI_SERVICE) as WifiManager?
         val location = context.getSystemService(Context.LOCATION_SERVICE) as LocationManager?
-        log("======== intento del ${day.format(Date())} ========")
+        log("======== intento del ${synchronized(day) { day.format(Date()) }} ========")
         log("Motocom ${BuildConfig.VERSION_NAME} en ${Build.BRAND} ${Build.MODEL}, Android ${Build.VERSION.RELEASE} (${Build.VERSION.SDK_INT})")
         log("wifi ${if (wifi?.isWifiEnabled == true) "encendido" else "APAGADO"}, " +
             "ubicación ${if (location != null && LocationManagerCompat.isLocationEnabled(location)) "encendida" else "APAGADA"}, " +
-            "ADB ${ShellLink.status.value} (uid ${ShellLink.uid()}), app ${chosenApp.value ?: "ninguna"} a ${dpi.intValue} ppp")
+            "ADB ${if (ShellLink.ready) "READY" else "NOT_RUNNING"} (uid ${ShellLink.uid()}), app ${chosenApp.value ?: "ninguna"} a ${dpi.intValue} ppp")
     }
 
-    /** The bike only comes once it has been called, and the first call can be too early. */
+    /**
+     * The bike only comes once it has been called, and the first call can be too early: keep
+     * calling until it comes, for as long as this link is the one (giving up is [giveUp]'s).
+     */
     private fun knockUntilHeard(link: BikeLink, bike: InetAddress, phone: InetAddress?) {
         thread(name = "moto-llamar", isDaemon = true) {
-            repeat(10) {
-                if (this.link !== link || link.bikeInfo != null) return@thread
+            var calls = 0
+            while (this.link === link && link.bikeInfo == null) {
                 link.knock(bike, phone)
+                if (++calls == 10) log("la moto no ha venido tras 10 llamadas: se sigue llamando")
                 Thread.sleep(3000)
             }
-            if (this.link === link && link.bikeInfo == null) log("la moto no ha venido tras 10 llamadas")
         }
     }
 
     private fun toast(text: String) = main.post { Toast.makeText(context, text, Toast.LENGTH_LONG).show() }
 
     private fun log(line: String) {
-        val stamped = "${stamp.format(Date())}  $line"
-        synchronized(file) { runCatching { file.appendText(stamped + "\n") } }
+        // Lines come from many threads, and SimpleDateFormat is not to be shared between them.
+        val stamped = synchronized(file) {
+            "${stamp.format(Date())}  $line".also { runCatching { file.appendText(it + "\n") } }
+        }
         main.post {
             lines += stamped
             if (lines.size > 400) lines.removeRange(0, 100)
@@ -348,6 +481,8 @@ class Moto private constructor(private val context: Context) {
         private const val MAX_BYTES = 1_000_000
         const val SEARCH_MS = 3 * 60 * 1000L
         const val AFTER_LEFT_MS = 10 * 60 * 1000L
+        /** How long Connect waits for ADB before letting the phone sleep again. */
+        const val WAIT_ADB_MS = 3 * 60 * 1000L
         /** Time for the last attempt to let go of the ports. */
         private const val RETRY_MS = 3000L
 

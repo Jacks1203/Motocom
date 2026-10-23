@@ -43,19 +43,28 @@ móvil** (`127.0.0.1`), sin root, sin ordenador y sin Shizuku:
   inalámbrica las siguientes veces.
 - Nada sale a internet: ADB va por dentro del propio móvil.
 
-Ese proceso sigue en marcha hasta que reinicias el móvil. Para retirar la autorización, entra en
-Opciones de desarrollador → «Revocar autorizaciones de depuración» y reinicia el móvil.
+Ese proceso sigue en marcha hasta que reinicias el móvil, actualizas o desinstalas Motocom. Para
+retirar la autorización, entra en Opciones de desarrollador → «Revocar autorizaciones de depuración»
+y reinicia el móvil. El permiso `WRITE_SECURE_SETTINGS` sigue concedido hasta desinstalar Motocom.
+
+En algunos Android 14 o superiores (como Android 17 en Pixel), la pantalla de la moto se apagaría
+con la del móvil. Ahí el proceso la crea como «dispositivo conectado», igual que las pantallas
+que se mandan a un coche, y para eso empareja con el sistema un dispositivo ficticio «Moto».
+Ese emparejamiento se quita al desconectar.
 
 ## Permisos
 
 | Permiso | Para qué lo usa Motocom |
 |---|---|
 | Cámara | Leer el código QR de la pantalla de la moto (nombre de su wifi y contraseña). Solo mientras lees el QR. |
-| Dispositivos wifi cercanos (Android 13+) | Encontrar el wifi directo de la pantalla de la moto. Está declarado como «no se usa para la ubicación». |
-| Ubicación | Android la exige para buscar dispositivos por wifi directo. Motocom no lee ni guarda tu ubicación. |
+
+Los puertos de Motocom solo aceptan conexiones de la pantalla de la moto, no de otros aparatos del
+wifi en que esté el móvil.
+| Dispositivos wifi cercanos (Android 13+) | Encontrar el wifi directo de la pantalla de la moto. Está declarado como «no se usa para la ubicación». Imprescindible. |
+| Ubicación (solo Android 12 o anterior) | Esos Android la exigen para buscar dispositivos por wifi directo. Motocom no lee ni guarda tu ubicación. En Android 13+ no se pide. |
 | Ver y cambiar el wifi y la red | Conectarse al wifi directo de la moto. |
 | Acceso a la red (`INTERNET`) | Hablar con la moto por su wifi y con ADB dentro del propio móvil. Motocom no usa internet (la app de mapas sí puede usarlo). |
-| Notificaciones | Mostrar la notificación «Pantalla de la moto» mientras manda la imagen. |
+| Notificaciones | Mostrar la notificación «Pantalla de la moto» mientras manda la imagen. Opcional: sin ella funciona igual. |
 | Servicio en primer plano (dispositivo conectado) | Seguir mandando la imagen con la app en segundo plano o el móvil bloqueado. |
 | Mantener el móvil activo (`WAKE_LOCK`) | Que el móvil no se duerma mientras manda la imagen con la pantalla apagada. |
 | Pedir quitar la optimización de batería | Ofrecer el botón «Permitir» para que Android no corte la imagen con el móvil bloqueado. Es opcional. |
@@ -75,7 +84,8 @@ Con el SDK de Android instalado y `local.properties` apuntando a él (`sdk.dir=�
 ```
 
 El APK queda en `app/build/outputs/apk/debug/`. La versión publicada se hace con
-`./gradlew assembleRelease` y necesita la clave de firma, que no está en el repositorio
+`./gradlew assembleRelease` (sin `-PcableTests=true`, que solo sirve para probar con
+`codigo/moto_falsa.py` por el cable) y necesita la clave de firma, que no está en el repositorio
 (`keystore.properties` con `storeFile`, `storePassword`, `keyAlias` y `keyPassword`).
 
 ## Documentación

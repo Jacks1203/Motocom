@@ -20,16 +20,28 @@ import java.util.concurrent.TimeUnit
 class AdbIdentity(context: Context) : AbsAdbConnectionManager() {
     private val key: PrivateKey
     private val cert: Certificate
+    /** True when this identity was just made, so no phone has accepted it yet. */
+    val isNew: Boolean
+    /** True when the saved identity could not be read and was replaced. */
+    val wasBroken: Boolean
     init {
         setApi(Build.VERSION.SDK_INT)
         setTimeout(15, TimeUnit.SECONDS)
         val identity = File(context.noBackupFilesDir, "adb-identity.p12")
-        val store = java.security.KeyStore.getInstance("PKCS12")
         val password = CharArray(0) // File is protected by Android's app sandbox.
-        if (identity.exists()) {
+        val saved = if (identity.exists()) runCatching {
+            val store = java.security.KeyStore.getInstance("PKCS12")
             identity.inputStream().use { store.load(it, password) }
-            key = store.getKey("adb", password) as PrivateKey
-            cert = store.getCertificate("adb")
+            val savedKey = store.getKey("adb", password) as PrivateKey
+            savedKey to checkNotNull(store.getCertificate("adb"))
+        }.getOrNull() else null
+        // A damaged file would fail every start: drop it and pair again with a new one.
+        wasBroken = identity.exists() && saved == null
+        if (wasBroken) identity.delete()
+        isNew = saved == null
+        if (saved != null) {
+            key = saved.first
+            cert = saved.second
         } else {
             val pair = KeyPairGenerator.getInstance("RSA").apply { initialize(2048) }.generateKeyPair()
             key = pair.private
@@ -39,6 +51,7 @@ class AdbIdentity(context: Context) : AbsAdbConnectionManager() {
                 Date(System.currentTimeMillis() - 86400000), Date(System.currentTimeMillis() + 10L * 365 * 86400000), subject, pair.public)
             cert = JcaX509CertificateConverter().setProvider(provider).getCertificate(
                 builder.build(JcaContentSignerBuilder("SHA256withRSA").setProvider(provider).build(key)))
+            val store = java.security.KeyStore.getInstance("PKCS12")
             store.load(null, password)
             store.setKeyEntry("adb", key, password, arrayOf(cert))
             val temp = File(context.noBackupFilesDir, "adb-identity.tmp")

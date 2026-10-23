@@ -27,16 +27,19 @@ data class BikeQr(
             val fields = text.substringAfter('?', "").split('&').mapNotNull { pair ->
                 val key = pair.substringBefore('=', "")
                 if (key.isEmpty()) return@mapNotNull null
-                val value = runCatching { URLDecoder.decode(pair.substringAfter('='), "UTF-8") }.getOrNull()
+                // URLDecoder reads '+' as a space, as in forms; in a password it is just a '+'.
+                val raw = pair.substringAfter('=').replace("+", "%2B")
+                val value = runCatching { URLDecoder.decode(raw, "UTF-8") }.getOrNull()
                     ?: return@mapNotNull null
                 key.lowercase() to value
             }.toMap()
             val ssid = fields["ssid"].orEmpty()
             val name = fields["name"].orEmpty().ifEmpty { ssid.removePrefix("DIRECT-") }
-            if (name.isEmpty()) return null
+            // Any address with a name in it is not enough: the bike's always carries these.
+            if (name.isEmpty() || ("modelid" !in fields && "action" !in fields)) return null
             return BikeQr(
                 name = name,
-                ssid = ssid.ifEmpty { "DIRECT-$name" },
+                ssid = ssid.ifEmpty { name }.let { if (it.startsWith("DIRECT-")) it else "DIRECT-$it" },
                 password = fields["pwd"].orEmpty(),
                 model = fields["modelid"].orEmpty(),
                 serial = fields["sn"].orEmpty()

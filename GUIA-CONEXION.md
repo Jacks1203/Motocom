@@ -49,7 +49,7 @@ Referencias de los fabricantes: [pantalla dividida en Xiaomi](https://www.mi.com
 1. Abre Motocom en su pantalla **ADB** (el indicador de arriba a la derecha) y Ajustes en **pantalla dividida**. Es importante mantener abierto el diálogo de emparejamiento de Android; si lo cierras, el código y el puerto pueden caducar.
 2. En Depuración inalámbrica, pulsa **Vincular dispositivo con código de vinculación**.
 3. Android muestra una dirección como `192.168.1.20:37123` y un código de seis cifras. En el paso **1 · Emparejar** de Motocom, introduce **37123** en **Puerto de emparejamiento** y las seis cifras en **Código de 6 cifras**. Los números son ejemplos: usa los de tu móvil.
-4. Pulsa **Emparejar** y espera la confirmación.
+4. Pulsa **Emparejar** y espera a que el panel de arriba diga **Emparejado**.
 
 Motocom se conecta a `127.0.0.1`, es decir, al propio móvil. No hay que introducir la IP ni conectarse a otro dispositivo. La identidad se guarda en el almacenamiento privado de la app y no entra en copias de seguridad. El código de emparejamiento no se guarda.
 
@@ -66,22 +66,23 @@ A partir de ahí el proceso de pantalla se comunica con la app mediante Binder, 
 
 1. Cierra completamente Carbit Ride y OffNavigator: usan los mismos puertos que Motocom.
 2. Enciende la pantalla de la moto y abre su función de conexión al teléfono.
-3. Activa **wifi y ubicación** en el móvil.
-4. En Motocom, pulsa **Leer QR de la moto** y apunta al código de su pantalla. Solo hace falta la primera vez; después la moto aparece en la fila **Moto**.
+3. Activa el **wifi** en el móvil (y la **ubicación** si tu Android es el 12 o anterior).
+4. En Motocom, pulsa **Leer QR de la moto** y apunta al código de su pantalla (la primera vez pide permiso para la cámara). Solo hace falta la primera vez; después la moto aparece en la fila **Moto**. Leer el QR no conecta todavía.
 5. En la fila **App**, elige la app que quieres mostrar.
 6. En **Tamaño en la moto**, elige el tamaño de letras y botones. La miniatura muestra cuánto mapa cabe. **Elígelo antes de conectar: una vez conectado no se puede cambiar.**
-7. Pulsa **Conectar** y acepta los permisos solicitados. La app busca por wifi directo la moto que leyó en el QR.
-8. Cuando llegue la imagen, el panel de arriba pone **En la moto**. Para escribir un destino, pulsa **Al móvil** y, al terminar, **A la moto**. Comprueba parado qué sucede al bloquear el teléfono antes de usarlo en ruta.
+7. Pulsa **Conectar** y acepta los permisos solicitados: **Dispositivos cercanos** (o **Ubicación exacta** en Android 12 o anterior) es imprescindible para encontrar la moto; las **notificaciones** son opcionales. Si deniegas el imprescindible, Motocom lo avisa y te lleva a Ajustes. La app busca por wifi directo la moto que leyó en el QR.
+8. Cuando llegue la imagen, el panel de arriba pone **En la moto**. Para escribir un destino, pulsa **Al móvil** (el panel pasa a **La app está en el móvil**) y, al terminar, **A la moto**. Si la moto se reconecta mientras escribes, la app no se te quita del móvil. Comprueba parado qué sucede al bloquear el teléfono antes de usarlo en ruta.
 
 La conexión de vídeo con la moto no necesita internet. Los mapas o servicios de navegación pueden necesitar datos móviles o mapas descargados. Si Motocom avisa del ahorro de batería, pulsa **Permitir**: ayuda a mantener la imagen con el móvil bloqueado.
 
 ## Las siguientes veces
 
-- Basta con pulsar **Conectar**: si ADB está parado, Motocom lo inicia sola (si Android le deja encender la depuración inalámbrica; si no, actívala tú antes).
+- Basta con pulsar **Conectar**: si ADB está parado, Motocom lo inicia sola (si Android le deja encender la depuración inalámbrica; si no, actívala tú antes). En Xiaomi, Redmi o POCO, para que pueda encenderla sola activa en Opciones de desarrollador **Depuración USB (ajustes de seguridad)** antes del primer **Iniciar ADB**. Si ADB no arranca en 3 minutos, Motocom deja de esperar.
 - Si Android cierra Motocom o fuerzas su cierre, el proceso ADB sigue vivo: al abrirla vuelve **ADB activo** en uno o dos segundos.
 - Tras reiniciar el teléfono o reinstalar la app: activa la depuración inalámbrica y repite **Iniciar ADB**. Fuera de casa, sin wifi, mira el apartado siguiente.
 - No suele hacer falta repetir **Emparejar**. Hazlo si Android ha olvidado la identidad, has borrado los datos de Motocom o reinstalado la app. Android puede revocar autorizaciones inactivas.
-- **Desconectar** detiene el vídeo, libera la pantalla virtual y finaliza la búsqueda de la moto. El proceso ADB permanece disponible hasta reiniciar el móvil.
+- **Desconectar** detiene el vídeo, libera la pantalla virtual y finaliza la búsqueda de la moto. El proceso ADB permanece disponible hasta reiniciar el móvil o actualizar la app.
+- Si la pantalla de la moto corta la conversación sin apagar su wifi, Motocom vuelve a llamarla sola.
 
 ## Fuera de casa, sin wifi
 
@@ -102,8 +103,8 @@ Si ya ponía **ADB activo**, no hace falta nada: ADB sigue en marcha hasta reini
 | Empareja pero no conecta | Usa el puerto de la pantalla principal, no el del código. Verifica que la depuración inalámbrica siga activa. |
 | Conexión rechazada | El puerto cambia al desactivar depuración, cambiar de red o reiniciar. Vuelve a copiar el puerto actual. |
 | ADB conecta pero no arranca la pantalla | Mantén Motocom abierta y reintenta. Puede haber una restricción del fabricante; comparte el registro. Para diagnóstico por ordenador: `adb logcat -d -s MotocomADB`. |
-| No encuentra la moto | Wifi y ubicación encendidos, permisos concedidos y función de conexión abierta en la TFT. |
-| La moto no recibe vídeo | Cierra Carbit Ride y OffNavigator y vuelve a conectar. Comparte el registro de Motocom. |
+| No encuentra la moto | Wifi encendido (y ubicación en Android 12 o anterior), permiso de dispositivos cercanos concedido y función de conexión abierta en la TFT. |
+| La moto no recibe vídeo | Cierra Carbit Ride y OffNavigator y vuelve a conectar. Si el panel dice **La app no ha llegado a la moto**, pulsa **A la moto**. Comparte el registro de Motocom. |
 | Se para al bloquear | Revisa el ahorro de batería, la versión de Android y las restricciones de la app elegida. |
 
 Para guardar los detalles del intento, toca el icono **Registro** de arriba a la derecha y después **Compartir**. Si un emparejamiento queda sin respuesta, cierra completamente Motocom y reintenta con un diálogo de código nuevo.

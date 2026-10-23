@@ -22,6 +22,8 @@ object ShellLink {
     val message = mutableStateOf("Activa la depuración inalámbrica para empezar.")
     @Volatile var display: IBikeDisplay? = null
         private set
+    /** Right away, unlike [status], which follows on the main thread. */
+    val ready: Boolean get() = display != null
     private lateinit var context: Context
     private var log: (String) -> Unit = {}
     private val main = Handler(Looper.getMainLooper())
@@ -34,6 +36,8 @@ object ShellLink {
     private var manager: AdbIdentity? = null
     /** Set once this phone has accepted our key, so later starts need no port or code. */
     val paired = mutableStateOf(false)
+    /** Paired just now and not started yet, so the next step is Iniciar ADB. */
+    val justPaired = mutableStateOf(false)
     private val prefs by lazy { context.getSharedPreferences("adb", Context.MODE_PRIVATE) }
     var onReady: (() -> Unit)? = null
     var onLost: (() -> Unit)? = null
@@ -42,6 +46,11 @@ object ShellLink {
         remember(context)
         this.log = log
         paired.value = prefs.getBoolean(KEY_PAIRED, false)
+        // The app died while it had wireless debugging on for a start: leave the phone as it was.
+        if (prefs.getBoolean(KEY_SWITCHED, false) && !busy.value) {
+            if (canWriteSettings() && setWirelessDebugging(false)) log("depuración inalámbrica apagada: la dejó encendida un inicio que no acabó")
+            prefs.edit().remove(KEY_SWITCHED).apply()
+        }
     }
 
     /** The provider may be asked to attach before the app has set anything else up. */
@@ -88,9 +97,24 @@ object ShellLink {
     }
 
     fun pair(port: String, code: String) = work {
+        main.post { justPaired.value = false }
         val number = validPort(port)
         require(code.matches(Regex("[0-9]{6}"))) { "El código debe tener 6 cifras." }
-        check(client().pair("127.0.0.1", number, code)) { "No se pudo emparejar." }
+        val adb = client(pairing = true)
+        // The library sets no time limit on pairing, so a hung socket is left behind on its thread.
+        var result: Result<Boolean>? = null
+        val done = CountDownLatch(1)
+        thread(name = "motocom-pair", isDaemon = true) {
+            result = runCatching { adb.pair("127.0.0.1", number, code) }
+            done.countDown()
+        }
+        if (!done.await(30, TimeUnit.SECONDS)) {
+            manager = null // The next try gets a client of its own.
+            throw IllegalStateException("El emparejamiento no responde: abre un código nuevo y reinténtalo.")
+        }
+        check(result!!.getOrThrow()) { "No se pudo emparejar." }
+        needsPairing = false
+        main.post { justPaired.value = true }
         "Emparejado. Introduce el puerto de conexión de la pantalla principal y pulsa Iniciar ADB."
     }
 
@@ -113,8 +137,9 @@ object ShellLink {
      */
     fun quickStart() = work {
         if (display != null || survivor() != null) return@work "ADB ya está listo."
-        val switched = enableWirelessDebugging()
+        // First, so that a key needing pairing again does not leave debugging switched on.
         val adb = client()
+        val switched = enableWirelessDebugging()
         adb.disconnect()
         try {
             if (!adb.autoConnect(context, 20_000)) {
@@ -127,12 +152,20 @@ object ShellLink {
         } finally {
             adb.disconnect()
             // The worker no longer needs it, so leave the phone as it was.
-            if (switched) setWirelessDebugging(false)
+            if (switched) {
+                setWirelessDebugging(false)
+                prefs.edit().remove(KEY_SWITCHED).commit()
+            }
         }
     }
 
     /** Starts the worker over an open connection, then lets later starts switch debugging on by themselves. */
     private fun launch(adb: AdbIdentity): String {
+        // A worker that was still alive may have come back while connecting: keep its nonce.
+        if (display != null) {
+            main.post { justPaired.value = false }
+            return "ADB ya está listo."
+        }
         prefs.edit().putString(KEY_NONCE, UUID.randomUUID().toString())
             .putLong(KEY_STARTED, System.currentTimeMillis()).commit()
         val apk = context.applicationInfo.sourceDir.replace("'", "'\\''")
@@ -140,12 +173,14 @@ object ShellLink {
         // adbd kills its process group, so sh waits until setsid has moved the worker out of it.
         val command = "CLASSPATH='$apk' setsid nohup /system/bin/app_process /system/bin com.motocom.shell.ShellMain $nonce ${context.applicationInfo.uid / 100000} >/dev/null 2>&1 </dev/null & sleep 2"
         adb.openStream("exec:$command").use {
-            check(connected.await(15, TimeUnit.SECONDS) && display != null) {
-                "ADB conectó, pero no arrancó la pantalla. Reintenta; comprueba que la app siga abierta."
+            if (!connected.await(15, TimeUnit.SECONDS) || display == null) {
+                // No worker came, so there is none to wait for next time either.
+                prefs.edit().remove(KEY_STARTED).apply()
+                throw IllegalStateException("ADB conectó, pero no arrancó la pantalla. Reintenta; comprueba que la app siga abierta.")
             }
         }
         prefs.edit().putBoolean(KEY_PAIRED, true).apply()
-        main.post { paired.value = true }
+        main.post { paired.value = true; justPaired.value = false }
         if (!canWriteSettings()) {
             val output = runCatching {
                 adb.openStream("shell:pm grant ${context.packageName} ${Manifest.permission.WRITE_SECURE_SETTINGS} 2>&1")
@@ -160,13 +195,14 @@ object ShellLink {
 
     /**
      * A worker started since the phone last booted may still be alive after the app died; it
-     * looks for the app every second, so give it a moment instead of starting a second one.
+     * looks for the app every second at first and every five seconds later, so give it a
+     * moment instead of starting a second one.
      */
     private fun survivor(): IBikeDisplay? {
         val boot = System.currentTimeMillis() - SystemClock.elapsedRealtime()
         if (prefs.getLong(KEY_STARTED, 0) < boot) return null
         main.post { message.value = "Buscando el proceso ADB que ya estaba en marcha…" }
-        return await(3)
+        return await(6)
     }
 
     private fun canWriteSettings() =
@@ -179,12 +215,33 @@ object ShellLink {
     /** True only if this call switched it on. */
     private fun enableWirelessDebugging(): Boolean {
         if (android.os.Build.VERSION.SDK_INT < 30 || !canWriteSettings() || wirelessDebuggingOn()) return false
-        if (!setWirelessDebugging(true)) return false
+        // Written first, so init() can switch it off if the app dies before the end of the start.
+        prefs.edit().putBoolean(KEY_SWITCHED, true).commit()
+        if (!setWirelessDebugging(true)) {
+            prefs.edit().remove(KEY_SWITCHED).commit()
+            return false
+        }
         log("depuración inalámbrica activada por la app")
         return true
     }
 
-    private fun client() = manager ?: AdbIdentity(context).also { manager = it }
+    /** A new key replaced one the phone had accepted: nothing but pairing can work until it is. */
+    @Volatile private var needsPairing = false
+
+    private fun client(pairing: Boolean = false): AdbIdentity {
+        val identity = manager ?: AdbIdentity(context).also {
+            manager = it
+            if (it.wasBroken) log("la identidad ADB guardada estaba dañada: se ha hecho otra y hay que volver a emparejar")
+            // A new key is one this phone has never accepted, so ask for the code again.
+            if (it.isNew && prefs.getBoolean(KEY_PAIRED, false)) {
+                prefs.edit().putBoolean(KEY_PAIRED, false).apply()
+                main.post { paired.value = false }
+                needsPairing = true
+            }
+        }
+        if (needsPairing && !pairing) throw IllegalStateException("Motocom tiene una identidad ADB nueva: vuelve a emparejar en la pantalla ADB")
+        return identity
+    }
     private fun validPort(value: String): Int = value.toIntOrNull()?.takeIf { it in 1..65535 }
         ?: throw IllegalArgumentException("Introduce un puerto entre 1 y 65535.")
     private fun work(action: () -> String) {
@@ -193,7 +250,7 @@ object ShellLink {
         message.value = "Preparando ADB…"
         thread(name = "motocom-adb", isDaemon = true) {
             val result = try { action() } catch (e: Throwable) {
-                "Error ADB: ${e.message ?: e.javaClass.simpleName}. Comprueba la depuración y los puertos."
+                "Error ADB: ${(e.message ?: e.javaClass.simpleName).removeSuffix(".")}. Comprueba la depuración y los puertos."
             }
             log(result)
             main.post { message.value = result; busy.value = false }
@@ -203,5 +260,7 @@ object ShellLink {
     private const val KEY_PAIRED = "paired"
     private const val KEY_NONCE = "nonce"
     private const val KEY_STARTED = "started"
+    /** Set while wireless debugging is on only because a start switched it on. */
+    private const val KEY_SWITCHED = "switched_on"
     private const val ADB_WIFI = "adb_wifi_enabled"
 }

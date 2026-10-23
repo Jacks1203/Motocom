@@ -12,6 +12,7 @@ import android.view.Surface
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 /**
  * Puts a few black rows above and below the picture on its way to the encoder.
@@ -20,8 +21,16 @@ import java.util.concurrent.CountDownLatch
  * bottom (Waze's panel) showed as a light line across the top. With black at both ends, what
  * gets blended is black. The screen for the bike paints into [surface], [EDGE] rows shorter at
  * each end than [target], and each frame is drawn into [target] in between.
+ *
+ * The screen paints at 60 Hz and the bike takes about 30 a second, so no more than about 30
+ * a second go on; the last of a burst still goes, a little later.
  */
-class BlackEdges(target: Surface, private val width: Int, private val height: Int) {
+class BlackEdges(
+    target: Surface,
+    private val width: Int,
+    private val height: Int,
+    private val log: (String) -> Unit = {}
+) {
 
     /** The height the screen for the bike gets. */
     val inner = height - 2 * EDGE
@@ -36,6 +45,16 @@ class BlackEdges(target: Surface, private val width: Int, private val height: In
     private lateinit var frames: SurfaceTexture
     private val matrix = FloatArray(16)
     @Volatile private var released = false
+
+    /** The time stamped on the last frame that went to [target], in ns; only on [thread]. */
+    private var drawnAt = 0L
+    /** A frame was held back and [late] will draw it. */
+    private var held = false
+    private val late = Runnable {
+        held = false
+        // Stamped after the encoder's 30 a second, or it would drop the very frame that matters.
+        if (!released) draw(maxOf(stamp(), drawnAt + LATE_STAMP_NS))
+    }
 
     /** Where the screen for the bike paints. */
     lateinit var surface: Surface
@@ -79,7 +98,7 @@ class BlackEdges(target: Surface, private val width: Int, private val height: In
 
             frames = SurfaceTexture(texture).apply {
                 setDefaultBufferSize(width, inner)
-                setOnFrameAvailableListener({ draw() }, handler)
+                setOnFrameAvailableListener({ frame() }, handler)
             }
             surface = Surface(frames)
             // Black until the first frame comes.
@@ -88,9 +107,30 @@ class BlackEdges(target: Surface, private val width: Int, private val height: In
         }
     }
 
-    private fun draw() {
+    /** A frame came: always taken off the screen's queue, so it never stalls; drawn at most 30 a second. */
+    private fun frame() {
         if (released) return
         frames.updateTexImage()
+        val made = stamp()
+        // By the frames' own times, regular at 60 Hz: every other one is due.
+        if (drawnAt == 0L || made - drawnAt >= GAP_NS) {
+            handler.removeCallbacks(late)
+            held = false
+            draw(made)
+        } else if (!held) {
+            // If no other frame comes, this one still has to reach the bike. Later than the
+            // next frame of a steady stream would come, so that one goes first and on time.
+            held = true
+            handler.postDelayed(late, GAP_MS + GAP_MS / 2)
+        }
+    }
+
+    /** When the frame last taken from the screen was made; now if the screen did not say. */
+    private fun stamp() = frames.timestamp.takeIf { it > 0 } ?: System.nanoTime()
+
+    /** Draws the frame last taken from the screen, stamped [at] for the encoder. */
+    private fun draw(at: Long) {
+        drawnAt = at
         frames.getTransformMatrix(matrix)
         clear()
         GLES20.glViewport(0, EDGE, width, inner)
@@ -102,7 +142,7 @@ class BlackEdges(target: Surface, private val width: Int, private val height: In
         GLES20.glEnableVertexAttribArray(position)
         GLES20.glVertexAttribPointer(position, 2, GLES20.GL_FLOAT, false, 0, QUAD)
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
-        EGLExt.eglPresentationTimeANDROID(egl, window, frames.timestamp)
+        EGLExt.eglPresentationTimeANDROID(egl, window, at)
         EGL14.eglSwapBuffers(egl, window)
     }
 
@@ -115,8 +155,9 @@ class BlackEdges(target: Surface, private val width: Int, private val height: In
     /** Once the screen for the bike has let go of [surface]. */
     fun release() {
         released = true
-        runCatching {
+        try {
             onThread {
+                handler.removeCallbacks(late)
                 frames.setOnFrameAvailableListener(null)
                 surface.release()
                 frames.release()
@@ -126,11 +167,16 @@ class BlackEdges(target: Surface, private val width: Int, private val height: In
                 EGL14.eglDestroySurface(egl, window)
                 EGL14.eglDestroyContext(egl, context)
             }
+        } catch (e: Throwable) {
+            log("no se pudieron soltar los bordes negros: $e")
         }
         thread.quitSafely()
     }
 
-    /** Runs [work] where the EGL context lives and waits for it, passing on what it throws. */
+    /**
+     * Runs [work] where the EGL context lives and waits for it, passing on what it throws.
+     * A stuck driver must not hold the caller for ever: after [WAIT_MS] it gives up.
+     */
     private fun onThread(work: () -> Unit) {
         val done = CountDownLatch(1)
         var failed: Throwable? = null
@@ -143,13 +189,24 @@ class BlackEdges(target: Surface, private val width: Int, private val height: In
                 done.countDown()
             }
         }
-        done.await()
+        check(done.await(WAIT_MS, TimeUnit.MILLISECONDS)) { "EGL no contesta en $WAIT_MS ms" }
         failed?.let { throw it }
     }
 
     private companion object {
         /** Black rows at the top and at the bottom: more than the bike's scaling blends. */
         const val EDGE = 4
+        /** Most time a frame waits for a newer one before it goes anyway. */
+        const val GAP_MS = 33L
+        /**
+         * Shortest time between frames to the encoder: 30 a second, less the 2 ms the encoder's
+         * own limit lets through early.
+         */
+        const val GAP_NS = 31_500_000L
+        /** Far enough after the last frame that the encoder's limit never drops a late one. */
+        const val LATE_STAMP_NS = 36_000_000L
+        /** How long to wait for the EGL thread. */
+        const val WAIT_MS = 2000L
         const val EGL_RECORDABLE_ANDROID = 0x3142
 
         val QUAD = ByteBuffer.allocateDirect(8 * 4).order(ByteOrder.nativeOrder()).asFloatBuffer()

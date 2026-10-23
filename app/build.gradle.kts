@@ -15,9 +15,14 @@ android {
         // the phone locked, Android 13.
         minSdk = 29
         targetSdk = 36
-        versionCode = 9
-        versionName = "0.9"
+        versionCode = 10
+        versionName = "0.10"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        // Lets codigo/moto_falsa.py in through `adb forward`; never in a published build.
+        val cableTests = findProperty("cableTests") == "true"
+        buildConfigField("boolean", "CABLE_TESTS", cableTests.toString())
+        // A test build says so, so it is never taken for the published one.
+        if (cableTests) versionNameSuffix = "-prueba"
     }
 
     // The key that signs the published APK lives outside git, in keystore.properties next to
@@ -33,6 +38,9 @@ android {
         }
     }
     buildTypes {
+        debug {
+            buildConfigField("boolean", "CABLE_TESTS", "true")
+        }
         release {
             isMinifyEnabled = false
             if (signing != null) signingConfig = signingConfigs.getByName("release")

@@ -230,7 +230,8 @@ fun Segmented(options: List<String>, selected: Int, enabled: Boolean, onSelect: 
                         enabled -> Palette.Text
                         else -> Palette.Muted.copy(alpha = 0.6f)
                     },
-                    maxLines = 1
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
             }
         }

@@ -25,6 +25,8 @@ import java.util.Locale
 import java.util.TimeZone
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.concurrent.thread
 
 /** What the phone tells the bike about itself when the bike introduces itself. */
@@ -67,6 +69,12 @@ interface BikeEvents {
     fun log(line: String)
     fun state(state: BikeState) {}
     fun input(input: BikeInput) {}
+
+    /**
+     * The bike's side of the conversation died without the phone closing it. Said once per
+     * link; the link does nothing more by itself, so whoever made it closes it and makes another.
+     */
+    fun gone(why: String) {}
 }
 
 /**
@@ -91,7 +99,9 @@ class BikeLink(
     private val events: BikeEvents,
     private val pxcPort: Int = 10922,
     private val controlPort: Int = 10921,
-    private val dataPort: Int = 10920
+    private val dataPort: Int = 10920,
+    /** Who may connect: anybody else on the same network is shown the door at once. */
+    private val allow: (InetAddress) -> Boolean = { true }
 ) : Closeable {
 
     @Volatile private var closed = false
@@ -99,6 +109,13 @@ class BikeLink(
     private val open = Collections.synchronizedSet(mutableSetOf<Socket>())
     private val toAsk = LinkedBlockingQueue<PxcMessage>()
     private val saidOnce = Collections.synchronizedSet(mutableSetOf<String>())
+    private val refused = Collections.synchronizedSet(mutableSetOf<InetAddress>())
+    private val goneSaid = AtomicBoolean(false)
+
+    // A newer connection of the same kind takes over, and the older one must not undo its work.
+    private val controlTurn = AtomicInteger()
+    private val dataTurn = AtomicInteger()
+    @Volatile private var dataSocket: Socket? = null
 
     /** What the bike asked for, kept for the data connection, which arrives separately. */
     @Volatile private var request: PictureRequest? = null
@@ -138,14 +155,22 @@ class BikeLink(
                 }
                 Pxc.write(socket.getOutputStream(), Pxc.KNOCK, hello.toString().toByteArray())
                 val answer = Pxc.read(socket.getInputStream())
-                events.log("llamada a la moto: responde ${answer.text.ifEmpty { answer.toString() }}")
+                sayKnock("responde ${answer.text.ifEmpty { answer.toString() }}")
                 answer.command == Pxc.KNOCK + 1 &&
                     json(answer)?.get("status")?.jsonPrimitive?.contentOrNull.equals("true", ignoreCase = true)
             }
         } catch (e: IOException) {
-            events.log("llamada a la moto: ${e.message}")
+            // The local port in Android's message changes every call; it is not news.
+            sayKnock(e.message.orEmpty().replace(Regex("\\(port \\d+\\)"), "").replace(Regex(" from /\\S+"), ""))
             false
         }
+    }
+
+    /** Calls go every few seconds until the bike comes: the same outcome is worth one line. */
+    @Volatile private var lastKnock = ""
+    private fun sayKnock(outcome: String) {
+        if (outcome != lastKnock) events.log("llamada a la moto: $outcome")
+        lastKnock = outcome
     }
 
     override fun close() {
@@ -163,15 +188,34 @@ class BikeLink(
         thread(name = "moto-$name", isDaemon = true) {
             while (!closed) {
                 val socket = try { door.accept() } catch (e: IOException) { break }
-                socket.tcpNoDelay = true
-                socket.keepAlive = true
-                open += socket
+                val from: InetAddress? = socket.inetAddress
+                if (from == null || !runCatching { allow(from) }.getOrDefault(false)) {
+                    if (from != null && refused.add(from)) events.log("conexión rechazada de ${from.hostAddress}")
+                    runCatching { socket.close() }
+                    continue
+                }
+                // The bike opens four; a pile of them means something is wrong, not more bike.
+                val room = synchronized(open) { (open.size < MAX_OPEN).also { if (it) open += socket } }
+                if (!room) {
+                    once("lleno-$name") { "$name: demasiadas conexiones abiertas, se rechaza la de ${from.hostAddress}" }
+                    runCatching { socket.close() }
+                    continue
+                }
+                // close() may have gone through the open ones just before this one was added.
+                if (closed) {
+                    open -= socket
+                    runCatching { socket.close() }
+                    break
+                }
                 thread(name = "moto-$name-${socket.port}", isDaemon = true) {
                     try {
+                        socket.tcpNoDelay = true
+                        socket.keepAlive = true
                         serve(socket)
                     } catch (e: IOException) {
                         if (!closed) events.log("$name: se corta (${e.message})")
-                    } catch (e: RuntimeException) {
+                    } catch (e: Exception) {
+                        // Ours, not the bike's: a thread dying of it would take the app along.
                         events.log("$name: fallo nuestro: $e")
                     } finally {
                         open -= socket
@@ -193,10 +237,19 @@ class BikeLink(
         when (opening.command) {
             Pxc.OPEN_BIKE_ASKS -> {
                 events.log("la moto abre el canal de sus preguntas")
-                while (!closed) answerBike(Pxc.read(input), output)
+                endsSession("el canal de preguntas de la moto") {
+                    while (!closed) {
+                        // The bike beats once a second, so three of its own timeouts is plenty.
+                        // Set every time: its introduction, on this very channel, may change it.
+                        socket.soTimeout = 3 * bikeTimeoutMs
+                        answerBike(Pxc.read(input), output)
+                    }
+                }
             }
             Pxc.OPEN_PHONE_ASKS -> {
                 events.log("la moto abre el canal de nuestras preguntas")
+                // Only the bike's own beat, seen every second with the real bike, ends the
+                // session; this one failing is logged, as it always was.
                 askBike(socket)
             }
             else -> events.log("pxc: apertura desconocida $opening")
@@ -217,7 +270,7 @@ class BikeLink(
                 bikeInfo = info
                 events.log("la moto se presenta: ${asked.text.replace(Regex("\\s+"), "")}")
                 info?.get("socketTimeoutPeriodWifi")?.jsonPrimitive?.intOrNull
-                    ?.takeIf { it > 0 }?.let { bikeTimeoutMs = it * 1000 }
+                    ?.takeIf { it > 0 }?.let { bikeTimeoutMs = it.coerceAtMost(MAX_BIKE_TIMEOUT_S) * 1000 }
                 Pxc.write(output, reply, greeting(info).toString().toByteArray())
                 events.state(BikeState.GREETED)
             }
@@ -283,8 +336,41 @@ class BikeLink(
         }
     }
 
+    /**
+     * Either channel of the conversation ending, however it ends, means the bike is gone unless
+     * the phone closed the link itself.
+     */
+    private inline fun endsSession(what: String, talk: () -> Unit) {
+        var why = "$what se ha cerrado"
+        try {
+            talk()
+        } catch (e: SocketTimeoutException) {
+            why = "$what: la moto lleva demasiado sin decir nada"
+            throw e
+        } catch (e: Exception) {
+            why = "$what: ${e.message ?: e}"
+            throw e
+        } finally {
+            lost(why)
+        }
+    }
+
+    private fun lost(why: String) {
+        if (!closed && goneSaid.compareAndSet(false, true)) {
+            events.log("se pierde la sesión con la moto: $why")
+            events.gone(why)
+        }
+    }
+
     private fun greeting(bike: JsonObject?): JsonObject {
         val bikeId = bike?.get("HUID")?.jsonPrimitive?.contentOrNull.orEmpty()
+        val signed = if (bikeId.isEmpty()) "" else try {
+            card.sign(bikeId)
+        } catch (e: Exception) {
+            // Without it the bike may refuse the picture later, but the rest still goes on.
+            events.log("no se pudo cifrar el identificador de la moto: $e")
+            ""
+        }
         return buildJsonObject {
             put("pxcVersion", "1.0.2")
             put("phoneUUID", card.uuid)
@@ -296,7 +382,7 @@ class BikeLink(
             put("versionCode", card.versionCode)
             put("token", 0)
             put("pubkey", card.publicKey)
-            put("encryptedHUID", if (bikeId.isEmpty()) "" else card.sign(bikeId))
+            put("encryptedHUID", signed)
             put("bluetoothName", card.bluetoothName)
             put("supportH264IFrame", true)
             put("supportFunction", bike?.get("supportFunction")?.jsonPrimitive?.longOrNull ?: 0L)
@@ -319,6 +405,9 @@ class BikeLink(
     // ---- The picture --------------------------------------------------------------------
 
     private fun control(socket: Socket) {
+        // No timeout here: how often the bike beats on this one is not known. It goes down with
+        // the rest when the link is closed after the bike is gone.
+        val turn = synchronized(controlTurn) { controlTurn.incrementAndGet() }
         val input = socket.getInputStream()
         val output = socket.getOutputStream()
         try {
@@ -371,9 +460,14 @@ class BikeLink(
                 }
             }
         } finally {
-            request = null
-            runCatching { picture.stop() }
-            if (!closed) events.state(BikeState.GREETED)
+            // An older control connection ending must not undo what a newer one set up.
+            synchronized(controlTurn) {
+                if (controlTurn.get() == turn) {
+                    request = null
+                    runCatching { picture.stop() }
+                    if (!closed) events.state(BikeState.GREETED)
+                }
+            }
         }
     }
 
@@ -382,6 +476,26 @@ class BikeLink(
             events.log("datos: la moto viene a por imagen sin haberla pedido")
             return
         }
+        // A new data connection replaces the old one, which is closed so that it stops at once.
+        val turn = synchronized(dataTurn) {
+            dataSocket?.let { old -> runCatching { old.close() } }
+            dataSocket = socket
+            dataTurn.incrementAndGet()
+        }
+        try {
+            sendPicture(socket, wanted, turn)
+        } catch (e: IOException) {
+            // Closed on purpose because a newer one took over: nothing to tell.
+            if (dataTurn.get() == turn) throw e
+        } finally {
+            synchronized(dataTurn) { if (dataSocket === socket) dataSocket = null }
+        }
+    }
+
+    private fun sendPicture(socket: Socket, asked: PictureRequest, turn: Int) {
+        var wanted = asked
+        // No timeout here: the bike may stop asking while it shows a screen of its own, and a
+        // dead session is found by its beat, which closes this socket with the rest.
         val input = socket.getInputStream()
         val output = socket.getOutputStream().buffered(64 * 1024)
         events.log("la moto viene a por la imagen")
@@ -391,17 +505,22 @@ class BikeLink(
         var empty = 0
         var countedFrom = System.currentTimeMillis()
         val length = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN)
-        while (!closed) {
-            val wait = if (wanted.fps == 0) {
-                val asked = Rv.read(input)
-                if (asked.command != Rv.NEXT_FRAME) {
-                    events.log("datos: orden desconocida $asked")
+        while (!closed && dataTurn.get() == turn) {
+            val now = request ?: run {
+                events.log("datos: la moto ya no pide imagen")
+                return
+            }
+            if (now !== wanted) wanted = now
+            val wait = if (wanted.fps <= 0) {
+                val next = Rv.read(input)
+                if (next.command != Rv.NEXT_FRAME) {
+                    events.log("datos: orden desconocida $next")
                     Rv.write(output, Rv.NOT_SUPPORTED)
                     return
                 }
                 FRAME_WAIT_MS
             } else {
-                1000L / wanted.fps
+                1000L / wanted.fps.coerceIn(1, MAX_FPS)
             }
             // A frame goes as its length and then its bytes; "nothing new" is a length of zero.
             val chunk = picture.next(wait)
@@ -437,5 +556,9 @@ class BikeLink(
         /** How long a request for a frame waits for one before answering "nothing new". */
         const val FRAME_WAIT_MS = 40L
         const val TALLY_MS = 10_000L
+        const val MAX_FPS = 60
+        const val MAX_BIKE_TIMEOUT_S = 120
+        /** The bike opens four connections; a few more allow for it coming back. */
+        const val MAX_OPEN = 16
     }
 }

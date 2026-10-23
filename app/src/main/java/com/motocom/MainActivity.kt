@@ -1,7 +1,10 @@
 package com.motocom
 
+import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.graphics.Color as AndroidColor
 import android.net.Uri
 import android.os.Bundle
@@ -109,8 +112,25 @@ class MainActivity : ComponentActivity() {
 
     private enum class Page { HOME, ADB, LOG }
 
+    /** A permission the bike needs was refused: said on the home screen, with a way to Settings. */
+    private val refused = mutableStateOf(false)
+
     private val askPermissions = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
-        if (moto.missingPermissions().isEmpty()) moto.connect()
+        if (moto.missingPermissions().isEmpty()) {
+            refused.value = false
+            moto.connect()
+        } else {
+            refused.value = true
+        }
+    }
+
+    private val askCamera = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) {
+            scan()
+        } else {
+            Toast.makeText(this, "Sin cámara no se puede leer el QR. Permítela en Ajustes → Apps → Motocom → Permisos.", Toast.LENGTH_LONG).show()
+            if (!shouldShowRequestPermissionRationale(Manifest.permission.CAMERA)) openAppSettings()
+        }
     }
 
     private val scanQr = registerForActivityResult(ScanContract()) { result ->
@@ -119,12 +139,16 @@ class MainActivity : ComponentActivity() {
             Toast.makeText(this, "Ese código no es el de la pantalla de una moto.", Toast.LENGTH_LONG).show()
             return@registerForActivityResult
         }
-        // Whoever reads the code is standing at the bike: no need for another tap.
-        val adbUsable = ShellLink.status.value == ShellLink.Status.READY || ShellLink.paired.value
-        if (adbUsable && moto.chosenApp.value != null && !moto.running.value && !moto.waitingForAdb.value) connect()
+        // Not connecting by itself: the app and its size are to be chosen first.
+        Toast.makeText(this, "Moto vinculada.", Toast.LENGTH_SHORT).show()
     }
 
-    private fun readQr() = scanQr.launch(ScanOptions().apply {
+    private fun readQr() {
+        if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) scan()
+        else askCamera.launch(Manifest.permission.CAMERA)
+    }
+
+    private fun scan() = scanQr.launch(ScanOptions().apply {
         setDesiredBarcodeFormats(ScanOptions.QR_CODE)
         setPrompt("Apunta al código QR de la pantalla de la moto")
         setBeepEnabled(false)
@@ -138,9 +162,7 @@ class MainActivity : ComponentActivity() {
         )
         super.onCreate(savedInstanceState)
         moto = Moto.get(this)
-        if (moto.chosenApp.value == null) {
-            NAV_APPS.firstOrNull { installed(it) }?.let(moto::choose)
-        }
+        pickDefaultApp()
         setContent {
             MotocomTheme {
                 Surface(Modifier.fillMaxSize(), color = Palette.Background) {
@@ -167,11 +189,35 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         ShellLink.refresh()
         batteryFree.value = ignoringBatteryOptimizations()
+        if (moto.missingPermissions().isEmpty()) refused.value = false
+        if (!moto.running.value && moto.forgetMissingApp()) {
+            Toast.makeText(this, "La app elegida ya no está instalada.", Toast.LENGTH_LONG).show()
+            pickDefaultApp()
+        }
+    }
+
+    /** The first navigation app installed, if none is chosen yet. */
+    private fun pickDefaultApp() {
+        if (moto.chosenApp.value == null) NAV_APPS.firstOrNull { launchable(it) }?.let(moto::choose)
     }
 
     private fun connect() {
-        val missing = moto.missingPermissions()
-        if (missing.isEmpty()) moto.connect() else askPermissions.launch(missing.toTypedArray())
+        val ui = getSharedPreferences("motocom_ui", MODE_PRIVATE)
+        val missing = moto.permissions.filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
+        // Notifications are asked once; nearby devices (or location) every time they are missing.
+        if (moto.missingPermissions().isNotEmpty() || (missing.isNotEmpty() && !ui.getBoolean(KEY_ASKED, false))) {
+            ui.edit().putBoolean(KEY_ASKED, true).apply()
+            // Android 12 ignores asking for the fine location alone, coarse already granted.
+            askPermissions.launch(if (moto.missingPermissions().isNotEmpty()) moto.permissions else missing.toTypedArray())
+        } else {
+            moto.connect()
+        }
+    }
+
+    private fun openAppSettings() {
+        runCatching {
+            startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
+        }
     }
 
     /** The one screen for riding: which bike, which app, how big, and the button to go. */
@@ -180,6 +226,7 @@ class MainActivity : ComponentActivity() {
         val running by moto.running
         val state by moto.state
         val waiting by moto.waitingForAdb
+        val place by moto.appPlace
         val bike by moto.bike
         val chosen by moto.chosenApp
         val dpi by moto.dpi
@@ -217,14 +264,33 @@ class MainActivity : ComponentActivity() {
                         else "La moto se conectará en cuanto ADB esté listo.",
                         Icons.Code, working = true
                     )
-                    running && state == BikeState.SHOWING ->
-                        StatusPanel(Tone.GOOD, "En la moto", "${appName ?: "La app"} se ve en la moto. Ya puedes bloquear el móvil.", Icons.Check)
+                    running && state == BikeState.SHOWING && place == AppPlace.PHONE -> StatusPanel(
+                        Tone.WARN, "La app está en el móvil",
+                        "La moto no la ve. Cuando termines de escribir, pulsa «A la moto».", Icons.Phone
+                    )
+                    running && state == BikeState.SHOWING && place == AppPlace.NOWHERE -> StatusPanel(
+                        Tone.WARN, "La app no ha llegado a la moto",
+                        "La moto está conectada, pero ${appName ?: "la app"} no se ha podido llevar. Pulsa «A la moto» para reintentar.",
+                        Icons.Warning
+                    )
+                    running && state == BikeState.SHOWING -> StatusPanel(
+                        Tone.GOOD, "En la moto",
+                        "${appName ?: "La app"} se ve en la moto. " + if (Build.VERSION.SDK_INT >= 33) "Ya puedes bloquear el móvil."
+                            else "En este Android no bloquees el móvil: la imagen se pararía.",
+                        Icons.Check
+                    )
                     running && state == BikeState.GREETED ->
                         StatusPanel(Tone.NEUTRAL, "Preparando la imagen…", "La moto ha respondido.", Icons.Navigation, working = true)
                     running -> StatusPanel(
                         Tone.NEUTRAL, "Buscando la moto…",
                         "Abre la conexión con el móvil en la pantalla de la moto. Wifi y ubicación, encendidos.",
                         Icons.Navigation, working = true
+                    )
+                    refused.value -> StatusPanel(
+                        Tone.BAD, "Falta un permiso",
+                        if (Build.VERSION.SDK_INT >= 33) "Sin «Dispositivos cercanos» el móvil no puede encontrar el wifi de la moto."
+                        else "Sin «Ubicación exacta» este Android no deja encontrar el wifi de la moto. Motocom no lee tu ubicación.",
+                        Icons.Warning
                     )
                     adbMissing -> StatusPanel(Tone.WARN, "Falta configurar ADB", "Solo hace falta la primera vez.", Icons.Code)
                     bike == null -> StatusPanel(Tone.NEUTRAL, "Vincula tu moto", "Lee el código QR que aparece en su pantalla.", Icons.Qr)
@@ -259,7 +325,17 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
-                if (running) MoveApp() else SizeChooser(dpi)
+                if (refused.value && !running) {
+                    Callout("Concede el permiso en Ajustes y vuelve a pulsar Conectar.", Tone.BAD) {
+                        TextButton(onClick = ::openAppSettings) { Text("Ajustes") }
+                    }
+                }
+
+                if (running) {
+                    if (state == BikeState.SHOWING) MoveApp(place)
+                } else {
+                    SizeChooser(dpi)
+                }
 
                 if (!batteryFree.value) {
                     Callout(
@@ -332,7 +408,7 @@ class MainActivity : ComponentActivity() {
 
     /** While on the bike: bring the app over to type a destination, then send it back. */
     @Composable
-    private fun MoveApp() {
+    private fun MoveApp(place: AppPlace) {
         Section("Escribir un destino") {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text(
@@ -341,12 +417,12 @@ class MainActivity : ComponentActivity() {
                     color = Palette.Muted
                 )
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    FilledTonalButton(onClick = { moto.toPhone() }, Modifier.weight(1f).height(52.dp), shape = RoundedCornerShape(16.dp)) {
+                    FilledTonalButton(onClick = { moto.toPhone() }, Modifier.weight(1f).height(52.dp), enabled = place == AppPlace.BIKE, shape = RoundedCornerShape(16.dp)) {
                         Icon(Icons.Phone, null, Modifier.size(18.dp))
                         Spacer(Modifier.width(8.dp))
                         Text("Al móvil")
                     }
-                    FilledTonalButton(onClick = { moto.toBike() }, Modifier.weight(1f).height(52.dp), shape = RoundedCornerShape(16.dp)) {
+                    FilledTonalButton(onClick = { moto.toBike() }, Modifier.weight(1f).height(52.dp), enabled = place != AppPlace.BIKE, shape = RoundedCornerShape(16.dp)) {
                         Icon(Icons.Navigation, null, Modifier.size(18.dp))
                         Spacer(Modifier.width(8.dp))
                         Text("A la moto")
@@ -480,7 +556,10 @@ class MainActivity : ComponentActivity() {
     @OptIn(ExperimentalMaterial3Api::class)
     @Composable
     private fun AppPicker(chosen: String?, onDismiss: () -> Unit, onPick: (String) -> Unit) {
-        val apps = remember { launchableApps() }
+        // Asking every app its name takes a while with a few hundred of them.
+        val apps = produceState(emptyList<Pair<String, String>>()) {
+            value = withContext(Dispatchers.IO) { launchableApps() }
+        }.value
         var query by remember { mutableStateOf("") }
         val shown = apps.filter { query.isBlank() || it.second.contains(query.trim(), ignoreCase = true) }
         ModalBottomSheet(
@@ -540,7 +619,7 @@ class MainActivity : ComponentActivity() {
         packageManager.getApplicationLabel(packageManager.getApplicationInfo(pkg, 0)).toString()
     }.getOrDefault(pkg)
 
-    private fun installed(pkg: String) = runCatching { packageManager.getPackageInfo(pkg, 0) }.isSuccess
+    private fun launchable(pkg: String) = runCatching { packageManager.getLaunchIntentForPackage(pkg) != null }.getOrDefault(false)
 
     private fun ignoringBatteryOptimizations(): Boolean =
         (getSystemService(POWER_SERVICE) as PowerManager).isIgnoringBatteryOptimizations(packageName)
@@ -558,6 +637,7 @@ class MainActivity : ComponentActivity() {
 
     private companion object {
         const val ADB_ERROR = "Error ADB:"
+        const val KEY_ASKED = "permisos_pedidos"
         const val SIZE_WARNING = "Elige el tamaño antes de conectar: después no se puede cambiar."
 
         /** Density on the bike's 592 x 816 screen: higher, bigger letters and less map. */
