@@ -6,6 +6,7 @@ import android.app.TaskInfo
 import android.content.AttributionSource
 import android.content.Context
 import android.content.ContextWrapper
+import android.content.res.Configuration
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
 import android.hardware.display.VirtualDisplayConfig
@@ -146,7 +147,9 @@ class DisplayService() : IBikeDisplay.Stub() {
     fun forgetPairing() {
         if (Build.VERSION.SDK_INT < 34) return
         runCatching {
-            if (findPairing() != null) {
+            // Versions that could not find their pairing made a new one on every connection.
+            repeat(MAX_PAIRINGS) {
+                if (findPairing() == null) return
                 android.util.Log.i("MotocomADB", "quitando el emparejamiento de la moto: " +
                     run("cmd", "companiondevice", "disassociate", user(), SHELL, PAIRING))
             }
@@ -251,14 +254,27 @@ class DisplayService() : IBikeDisplay.Stub() {
         findPairing()?.let { return it }
         say("emparejando la moto como dispositivo conectado: " +
             run("cmd", "companiondevice", "associate", user(), SHELL, PAIRING, APP_STREAMING))
-        return findPairing() ?: error("no se pudo emparejar")
+        return findPairing() ?: error("no se pudo emparejar; la lista dice: " +
+            run("cmd", "companiondevice", "list", user()))
     }
 
     private fun user() = (Process.myUid() / 100_000).toString()
 
+    /**
+     * Android 17 on a Pixel lists each pairing whole ("mId=5, mPackageName='…'"); Android 15
+     * and 16 as "5 | package | address", and 14 as "package address 5".
+     */
     private fun findPairing(): Int? = output("cmd", "companiondevice", "list", user()).lineSequence()
-        .filter { "mPackageName='$SHELL'" in it && "mDeviceMacAddress=$PAIRING" in it }
-        .firstNotNullOfOrNull { Regex("mId=(\\d+)").find(it)?.groupValues?.get(1)?.toInt() }
+        .firstNotNullOfOrNull { line ->
+            val words = line.split(Regex("[\\s|,]+"))
+            when {
+                "mPackageName='$SHELL'" in line && "mDeviceMacAddress=$PAIRING" in line ->
+                    Regex("mId=(\\d+)").find(line)?.groupValues?.get(1)?.toInt()
+                SHELL in words && words.any { it.equals(PAIRING, ignoreCase = true) } ->
+                    words.firstNotNullOfOrNull { it.toIntOrNull() }
+                else -> null
+            }
+        }
 
     /** Takes whatever is on [displayId] back to the phone. */
     @SuppressLint("PrivateApi")
@@ -290,16 +306,52 @@ class DisplayService() : IBikeDisplay.Stub() {
      */
     @SuppressLint("PrivateApi")
     private fun moveTask(packageName: String, displayId: Int): String? {
-        val task = tasks().firstOrNull {
+        val open = tasks().filter {
             it.baseActivity?.packageName == packageName || it.topActivity?.packageName == packageName
-        } ?: return null
+        }
+        // Shrinking can leave the app in two tasks; the route is in the floating one.
+        val task = open.firstOrNull(::pinned) ?: open.firstOrNull() ?: return null
+        // Left while navigating, Maps shrinks to a floating window, and moved like that it stays
+        // a small box in the middle of the bike's screen. It is made whole before it goes.
+        val floating = displayId != 0 && pinned(task)
+        // From 12 there is no making it whole by hand. Not moved, and not "movida", it is
+        // started on the bike's screen at full screen instead, which takes it out of the window.
+        if (floating && Build.VERSION.SDK_INT >= 31) return "tarea ${task.taskId} de $packageName en ventana flotante"
+        if (floating) {
+            try {
+                toFullScreen(task)
+            } catch (e: Throwable) {
+                say("no se pudo poner a pantalla completa la tarea ${task.taskId} (${e.cause ?: e})")
+            }
+        }
         try {
             moveToDisplay(task, displayId)
         } catch (e: Throwable) {
             say("no se pudo mover la tarea ${task.taskId} de $packageName (${e.cause ?: e}): se abre de nuevo")
             return null
         }
-        return "movida la tarea ${task.taskId} de $packageName a la pantalla $displayId"
+        val moved = "la tarea ${task.taskId} de $packageName a la pantalla $displayId"
+        if (!floating) return "movida $moved"
+        val still = tasks().firstOrNull { it.taskId == task.taskId }?.let(::pinned) ?: false
+        // Not "movida", so bring() starts it there at full screen, which takes it out of the window.
+        return if (still) "sigue en ventana flotante $moved" else "movida $moved, que estaba en ventana flotante"
+    }
+
+    /** Whether [task] is in picture-in-picture, the floating window an app shrinks to. */
+    private fun pinned(task: TaskInfo): Boolean = try {
+        val config = TaskInfo::class.java.getField("configuration").get(task) as Configuration
+        val window = Configuration::class.java.getField("windowConfiguration").get(config)!!
+        window.javaClass.getMethod("getWindowingMode").invoke(window) == WINDOWING_MODE_PINNED
+    } catch (e: Throwable) {
+        false
+    }
+
+    @SuppressLint("PrivateApi")
+    private fun toFullScreen(task: TaskInfo) {
+        val atm = Class.forName("android.app.ActivityTaskManager")
+        val service = atm.getMethod("getService").invoke(null)!!
+        service.javaClass.methods.first { it.name == "setTaskWindowingMode" && it.parameterCount == 3 }
+            .invoke(service, task.taskId, WINDOWING_MODE_FULLSCREEN, false)
     }
 
     /**
@@ -410,8 +462,14 @@ class DisplayService() : IBikeDisplay.Stub() {
         /** VirtualDeviceParams.LOCK_STATE_ALWAYS_UNLOCKED. */
         const val LOCK_STATE_ALWAYS_UNLOCKED = 1
 
+        // WindowConfiguration.WINDOWING_MODE_*.
+        const val WINDOWING_MODE_FULLSCREEN = 1
+        const val WINDOWING_MODE_PINNED = 2
+
         /** A made-up, locally administered address that only names the bike's pairing. */
         const val PAIRING = "02:4d:4f:54:4f:01"
         const val APP_STREAMING = "android.app.role.COMPANION_DEVICE_APP_STREAMING"
+        /** More than earlier versions could have piled up on any phone. */
+        const val MAX_PAIRINGS = 50
     }
 }
