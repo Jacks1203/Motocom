@@ -98,7 +98,24 @@ object ShellLink {
 
     fun pair(port: String, code: String) = work {
         main.post { justPaired.value = false }
-        val number = validPort(port)
+        pairOn(validPort(port), code)
+        "Emparejado. Introduce el puerto de conexión de la pantalla principal y pulsa Iniciar ADB."
+    }
+
+    /**
+     * From the notification, with the pairing port found by mDNS: pairs, then starts as
+     * [quickStart] does. False if something else is under way, so nothing was tried.
+     */
+    fun pairAndStart(port: Int, code: String, done: (String) -> Unit) = work(done) {
+        pairOn(port, code)
+        runCatching { autoStart() }.getOrElse {
+            val why = (it.message ?: it.javaClass.simpleName).removeSuffix(".")
+            "Emparejado, pero no se pudo iniciar: $why. Vuelve a Motocom y pulsa Iniciar ADB."
+        }
+    }
+
+    private fun pairOn(number: Int, code: String) {
+        main.post { justPaired.value = false }
         require(code.matches(Regex("[0-9]{6}"))) { "El código debe tener 6 cifras." }
         val adb = client(pairing = true)
         // The library sets no time limit on pairing, so a hung socket is left behind on its thread.
@@ -115,7 +132,6 @@ object ShellLink {
         check(result!!.getOrThrow()) { "No se pudo emparejar." }
         needsPairing = false
         main.post { justPaired.value = true }
-        "Emparejado. Introduce el puerto de conexión de la pantalla principal y pulsa Iniciar ADB."
     }
 
     fun start(port: String) = work {
@@ -135,8 +151,10 @@ object ShellLink {
      * One-button start once paired: turns wireless debugging on if allowed, finds its
      * port by mDNS (it changes every time), starts the worker and restores the setting.
      */
-    fun quickStart() = work {
-        if (display != null || survivor() != null) return@work "ADB ya está listo."
+    fun quickStart() = work { autoStart() }
+
+    private fun autoStart(): String {
+        if (display != null || survivor() != null) return "ADB ya está listo."
         // First, so that a key needing pairing again does not leave debugging switched on.
         val adb = client()
         val switched = enableWirelessDebugging()
@@ -148,7 +166,7 @@ object ShellLink {
                     else "La depuración inalámbrica está apagada. Actívala en Opciones de desarrollador y vuelve a pulsar"
                 )
             }
-            launch(adb)
+            return launch(adb)
         } finally {
             adb.disconnect()
             // The worker no longer needs it, so leave the phone as it was.
@@ -244,8 +262,9 @@ object ShellLink {
     }
     private fun validPort(value: String): Int = value.toIntOrNull()?.takeIf { it in 1..65535 }
         ?: throw IllegalArgumentException("Introduce un puerto entre 1 y 65535.")
-    private fun work(action: () -> String) {
-        if (busy.value) return
+    /** Runs [action] off the main thread; [done] gets its outcome on the main thread. */
+    private fun work(done: (String) -> Unit = {}, action: () -> String): Boolean {
+        if (busy.value) return false
         busy.value = true
         message.value = "Preparando ADB…"
         thread(name = "motocom-adb", isDaemon = true) {
@@ -253,8 +272,9 @@ object ShellLink {
                 "Error ADB: ${(e.message ?: e.javaClass.simpleName).removeSuffix(".")}. Comprueba la depuración y los puertos."
             }
             log(result)
-            main.post { message.value = result; busy.value = false }
+            main.post { message.value = result; busy.value = false; done(result) }
         }
+        return true
     }
 
     private const val KEY_PAIRED = "paired"

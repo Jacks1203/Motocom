@@ -74,6 +74,12 @@
             android:exported="false"
             android:foregroundServiceType="connectedDevice" />
 
+        <!-- Asks for the pairing code in a notification, so Android's dialog stays open. -->
+        <service
+            android:name=".PairingService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
+
         <!-- Only shell/root with this session's nonce can hand us the display binder. -->
         <provider
             android:name=".shell.ShellProvider"

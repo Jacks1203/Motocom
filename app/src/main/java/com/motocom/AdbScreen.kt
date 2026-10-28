@@ -40,6 +40,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
@@ -56,7 +57,7 @@ import com.motocom.ui.TopBar
  * ever comes here, since Connect starts ADB by itself.
  */
 @Composable
-fun AdbScreen(onBack: () -> Unit, openDeveloperOptions: () -> Unit) {
+fun AdbScreen(onBack: () -> Unit, openDeveloperOptions: () -> Unit, pairByNotice: () -> Unit) {
     val ready = ShellLink.status.value == ShellLink.Status.READY
     val busy by ShellLink.busy
     val paired by ShellLink.paired
@@ -84,7 +85,7 @@ fun AdbScreen(onBack: () -> Unit, openDeveloperOptions: () -> Unit) {
                     Text("Volver a la moto")
                 }
                 if (manual) {
-                    ManualSetup(busy, openDeveloperOptions)
+                    PairSetup(busy, openDeveloperOptions, pairByNotice)
                     TextButton(onClick = { manual = false }, Modifier.fillMaxWidth()) { Text("Ocultar") }
                 } else {
                     TextButton(onClick = { manual = true }, Modifier.fillMaxWidth()) { Text("Emparejar de nuevo") }
@@ -97,7 +98,7 @@ fun AdbScreen(onBack: () -> Unit, openDeveloperOptions: () -> Unit) {
                     Text("Emparejar de nuevo o poner el puerto a mano")
                 }
             } else {
-                ManualSetup(busy, openDeveloperOptions)
+                PairSetup(busy, openDeveloperOptions, pairByNotice)
                 if (paired) {
                     TextButton(onClick = { manual = false }, Modifier.fillMaxWidth()) { Text("Volver al inicio rápido") }
                 }
@@ -112,6 +113,35 @@ fun AdbScreen(onBack: () -> Unit, openDeveloperOptions: () -> Unit) {
             }
             Spacer(Modifier.height(16.dp))
         }
+    }
+}
+
+/** The notification first, which needs no split screen; typing it all in by hand below. */
+@Composable
+private fun PairSetup(busy: Boolean, openDeveloperOptions: () -> Unit, pairByNotice: () -> Unit) {
+    if (Build.VERSION.SDK_INT < 30) {
+        ManualSetup(busy, openDeveloperOptions)
+        return
+    }
+    val searching by PairingService.searching
+    val context = LocalContext.current
+    Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+        Step(null, "Emparejar desde la notificación", NOTICE_STEPS) {
+            Button(
+                onClick = pairByNotice, enabled = !busy,
+                modifier = Modifier.fillMaxWidth().height(52.dp), shape = RoundedCornerShape(16.dp)
+            ) { Text(if (searching) "Abrir otra vez las opciones" else "Emparejar") }
+            if (searching) {
+                Text("Esperando el código en la notificación…", style = MaterialTheme.typography.bodyMedium, color = Palette.Muted)
+                TextButton(onClick = { PairingService.stop(context) }, Modifier.fillMaxWidth()) { Text("Cancelar") }
+            }
+        }
+        Text(
+            "O A MANO, CON PANTALLA DIVIDIDA",
+            Modifier.padding(start = 4.dp, top = 8.dp),
+            style = MaterialTheme.typography.labelMedium, color = Palette.Muted
+        )
+        ManualSetup(busy, openDeveloperOptions)
     }
 }
 
@@ -183,17 +213,17 @@ private fun portOf(typed: String): String {
 }
 
 @Composable
-private fun Step(number: Int, title: String, text: String, content: @Composable () -> Unit) {
+private fun Step(number: Int?, title: String, text: String, content: @Composable () -> Unit) {
     Section(null) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(
+                if (number != null) Box(
                     Modifier.size(28.dp).clip(CircleShape).background(Palette.Primary.copy(alpha = 0.16f)),
                     contentAlignment = Alignment.Center
                 ) {
                     Text("$number", color = Palette.Primary, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
                 }
-                Spacer(Modifier.width(12.dp))
+                if (number != null) Spacer(Modifier.width(12.dp))
                 Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
             }
             Text(text, style = MaterialTheme.typography.bodyMedium, color = Palette.Muted)
@@ -233,6 +263,13 @@ private const val ENABLE_HELP =
         "3. En Opciones de desarrollador, activa «Depuración inalámbrica» y acepta la red.\n" +
         "4. Para que Android no olvide la autorización, activa también «Desactivar el tiempo de espera de autorización de ADB».\n" +
         "5. En Xiaomi, Redmi o POCO, activa también «Depuración USB (ajustes de seguridad)»: sin ella Motocom no puede encender sola la depuración inalámbrica."
+
+private const val NOTICE_STEPS =
+    "Así no hace falta la pantalla dividida.\n" +
+        "1. Pulsa Emparejar: se abren las opciones de desarrollador.\n" +
+        "2. Entra en Depuración inalámbrica y toca «Vincular dispositivo con código» (en Xiaomi, «Emparejar dispositivo con código de sincronización»).\n" +
+        "3. Sin cerrar ese diálogo, baja la barra de notificaciones y toca «Escribir código» en el aviso de Motocom. Si no lo ves, despliega el aviso con su flecha.\n" +
+        "4. Escribe las 6 cifras y envía. Motocom busca sola los puertos y arranca ADB."
 
 private const val SPLIT_HELP =
     "• Abre Motocom y después Ajustes → Opciones de desarrollador → Depuración inalámbrica. Aún no abras el código.\n" +

@@ -82,6 +82,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.app.NotificationManagerCompat
 import androidx.core.graphics.drawable.toBitmap
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
@@ -133,6 +134,10 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private val askNotifications = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) pairByNotice() else noNotifications()
+    }
+
     private val scanQr = registerForActivityResult(ScanContract()) { result ->
         val text = result.contents ?: return@registerForActivityResult
         if (!moto.readQr(text)) {
@@ -176,7 +181,7 @@ class MainActivity : ComponentActivity() {
                     ) { shown ->
                         when (shown) {
                             Page.HOME -> Home(openAdb = { page = Page.ADB }, openLog = { page = Page.LOG })
-                            Page.ADB -> AdbScreen(onBack = { page = Page.HOME }, openDeveloperOptions = ::openDeveloperOptions)
+                            Page.ADB -> AdbScreen(onBack = { page = Page.HOME }, openDeveloperOptions = ::openDeveloperOptions, pairByNotice = ::pairByNotice)
                             Page.LOG -> LogScreen(onBack = { page = Page.HOME })
                         }
                     }
@@ -628,6 +633,25 @@ class MainActivity : ComponentActivity() {
     private fun askBatteryExemption() {
         runCatching {
             startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")))
+        }
+    }
+
+    /** The code is typed in a notification, so Android's pairing dialog never has to close. */
+    private fun pairByNotice() {
+        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            // Refused for good, Android answers at once and the notice settings open.
+            askNotifications.launch(Manifest.permission.POST_NOTIFICATIONS)
+            return
+        }
+        if (!NotificationManagerCompat.from(this).areNotificationsEnabled() || !PairingService.canAsk(this)) return noNotifications()
+        PairingService.start(this)
+        openDeveloperOptions()
+    }
+
+    private fun noNotifications() {
+        Toast.makeText(this, "Sin notificaciones no se puede escribir el código desde el aviso. Actívalas para Motocom o empareja a mano.", Toast.LENGTH_LONG).show()
+        runCatching {
+            startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, packageName))
         }
     }
 

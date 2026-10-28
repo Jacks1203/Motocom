@@ -19,7 +19,18 @@ Conecta el móvil a un wifi. En **Opciones de desarrollador**, activa **Depuraci
 
 ## 2. Emparejar una vez
 
-### Antes: cómo poner Motocom y Ajustes en pantalla dividida
+### La forma fácil: desde la notificación
+
+No hace falta la pantalla dividida, así que vale para cualquier móvil.
+
+1. En la pantalla **ADB** de Motocom, pulsa **Emparejar** en el bloque **Emparejar desde la notificación**. Si lo pide, permite las notificaciones: el código se escribe en una.
+2. Se abren las opciones de desarrollador. Entra en **Depuración inalámbrica** y toca **Vincular dispositivo con código** (en Xiaomi, Redmi o POCO se llama **Emparejar dispositivo con código de sincronización**).
+3. Motocom encuentra sola el puerto y muestra un aviso **Emparejar Motocom**. Sin cerrar el diálogo de Android, baja la barra de notificaciones y toca **Escribir código** en ese aviso. Si el aviso sale plegado y no ves el botón, despliégalo con su flecha.
+4. Escribe las seis cifras y envía. Motocom empareja y arranca ADB sin que copies ningún puerto. Cuando el aviso diga **ADB listo**, vuelve a Motocom; ya puedes saltarte el apartado 3.
+
+Si al bajar la barra se cierra el diálogo del código (pasa en algunos móviles), abre otro: el aviso se pone al día solo. Si no funciona, usa el método manual de abajo.
+
+### A mano: cómo poner Motocom y Ajustes en pantalla dividida
 
 **Pantalla dividida** significa ver dos aplicaciones a la vez: una arriba y otra abajo. Así puedes leer el código en Ajustes y escribirlo en Motocom sin cerrar el diálogo.
 
