@@ -31,7 +31,8 @@ object ShellMain {
             val system = activityThread.getMethod("getSystemContext").invoke(thread) as Context
             val context = system.createPackageContext("com.android.shell", 0)
             val service = DisplayService(context)
-            attach(service, args[0], args.getOrNull(1)?.toInt() ?: 0)
+            val pkgName = args.getOrNull(2) ?: "com.motocom"
+            attach(service, args[0], args.getOrNull(1)?.toInt() ?: 0, pkgName)
             Looper.loop()
         } catch (e: Throwable) {
             android.util.Log.e(TAG, "No se pudo arrancar", e)
@@ -39,13 +40,13 @@ object ShellMain {
         }
     }
 
-    private fun attach(service: DisplayService, nonce: String, userId: Int) {
-        val result = publish(service, nonce, userId)
+    private fun attach(service: DisplayService, nonce: String, userId: Int, pkgName: String) {
+        val result = publish(service, nonce, userId, pkgName)
         val lifetime = requireNotNull(result?.getBinder("lifetime"))
         lifetime.linkToDeath({
             // Without the app the bike's screen paints nowhere: give its apps back to the phone.
             service.release()
-            thread(name = "motocom-espera") { waitForApp(service, nonce, userId) }
+            thread(name = "motocom-espera") { waitForApp(service, nonce, userId, pkgName) }
         }, 0)
         check(lifetime.isBinderAlive)
     }
@@ -56,7 +57,7 @@ object ShellMain {
      * restarts. Ends if the app was reinstalled (this code is then stale) or if the app keeps
      * refusing, which happens when it has started a worker of its own.
      */
-    private fun waitForApp(service: DisplayService, nonce: String, userId: Int) {
+    private fun waitForApp(service: DisplayService, nonce: String, userId: Int, pkgName: String) {
         val apk = System.getenv("CLASSPATH")
         var refused = 0
         val since = SystemClock.elapsedRealtime()
@@ -65,12 +66,12 @@ object ShellMain {
             if (apk != null && !File(apk).exists()) {
                 android.util.Log.i(TAG, "La app se ha reinstalado o borrado: termina")
                 // Updated, the next worker may be about to use the pairing; uninstalled, nobody will.
-                if (!installed()) service.forgetPairing()
+                if (!installed(pkgName)) service.forgetPairing()
                 exitProcess(0)
             }
             if (!appRunning(service.owner)) continue
             try {
-                attach(service, nonce, userId)
+                attach(service, nonce, userId, pkgName)
                 return
             } catch (e: Throwable) {
                 android.util.Log.w(TAG, "La app no acepta el proceso", e)
@@ -79,8 +80,8 @@ object ShellMain {
         }
     }
 
-    private fun installed(): Boolean = runCatching {
-        val pm = ProcessBuilder("pm", "path", "com.motocom").redirectErrorStream(true).start()
+    private fun installed(pkgName: String): Boolean = runCatching {
+        val pm = ProcessBuilder("pm", "path", pkgName).redirectErrorStream(true).start()
         val said = pm.inputStream.bufferedReader().readText()
         pm.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)
         said.contains("package:")
@@ -94,8 +95,8 @@ object ShellMain {
 
     /** Same external-provider route as Android's `content` shell command. A shell process
      * has no registered app ActivityThread, so the ordinary ContentResolver cannot be used. */
-    private fun publish(service: DisplayService, nonce: String, userId: Int): Bundle? {
-        val authority = "com.motocom.shell"
+    private fun publish(service: DisplayService, nonce: String, userId: Int, pkgName: String): Bundle? {
+        val authority = "$pkgName.shell"
         val manager = Class.forName("android.app.ActivityManager").getMethod("getService").invoke(null)
         val managerApi = Class.forName("android.app.IActivityManager")
         val token = Binder()

@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Spanish, the default; the English ones are in values-en. -->
 <resources>
+    <string name="app_name">Motocom</string>
     <!-- Pantalla principal -->
     <string name="log">Registro</string>
     <string name="share_log">Compartir registro</string>
