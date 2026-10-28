@@ -27,6 +27,8 @@ import androidx.core.content.ContextCompat
 class BikeService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
 
+    override fun attachBaseContext(base: Context) = super.attachBaseContext(Language.wrap(base))
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -94,17 +96,7 @@ class BikeService : Service() {
         super.onDestroy()
     }
 
-    private fun createChannel() {
-        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && nm.getNotificationChannel(CHANNEL_ID) == null) {
-            nm.createNotificationChannel(
-                NotificationChannel(CHANNEL_ID, "Pantalla de la moto", NotificationManager.IMPORTANCE_LOW).apply {
-                    description = "Mantiene la pantalla de la moto con el móvil bloqueado"
-                    setShowBadge(false)
-                }
-            )
-        }
-    }
+    private fun createChannel() = createChannel(this)
 
     private fun notification(): Notification {
         val open = PendingIntent.getActivity(
@@ -118,13 +110,13 @@ class BikeService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("Pantalla de la moto")
-            .setContentText("Sigue aunque bloquees el móvil")
+            .setContentTitle(getString(R.string.bike_channel))
+            .setContentText(getString(R.string.bike_notice_text))
             .setSmallIcon(R.drawable.ic_moto)
             .setOngoing(true)
             .setContentIntent(open)
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
-            .addAction(0, "Desconectar", disconnect)
+            .addAction(0, getString(R.string.disconnect), disconnect)
             .build()
     }
 
@@ -146,6 +138,17 @@ class BikeService : Service() {
         private var foreground = false
         /** Starts asked for that have not reached onStartCommand yet. */
         private var pending = 0
+
+        /** Made again on every start of the app too: only the name and description change then, to its language. */
+        fun createChannel(context: Context) {
+            val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            nm.createNotificationChannel(
+                NotificationChannel(CHANNEL_ID, Language.text(context, R.string.bike_channel), NotificationManager.IMPORTANCE_LOW).apply {
+                    description = Language.text(context, R.string.bike_channel_description)
+                    setShowBadge(false)
+                }
+            )
+        }
 
         fun start(context: Context) {
             if (Looper.myLooper() != Looper.getMainLooper()) {

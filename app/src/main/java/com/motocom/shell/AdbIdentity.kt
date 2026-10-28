@@ -2,6 +2,9 @@ package com.motocom.shell
 
 import android.content.Context
 import android.os.Build
+import com.motocom.R
+import com.motocom.Refused
+import com.motocom.Said
 import io.github.muntashirakon.adb.AbsAdbConnectionManager
 import org.bouncycastle.asn1.x500.X500Name
 import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter
@@ -56,7 +59,7 @@ class AdbIdentity(context: Context) : AbsAdbConnectionManager() {
             store.setKeyEntry("adb", key, password, arrayOf(cert))
             val temp = File(context.noBackupFilesDir, "adb-identity.tmp")
             temp.outputStream().use { store.store(it, password) }
-            check(temp.renameTo(identity)) { "No se pudo guardar la identidad ADB" }
+            if (!temp.renameTo(identity)) throw Refused(Said(R.string.adb_identity_not_saved))
         }
     }
     override fun getPrivateKey() = key

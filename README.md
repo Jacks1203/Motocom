@@ -7,6 +7,9 @@ El móvil entra en el wifi directo de la pantalla de la moto, crea una pantalla 
 y le envía en vídeo H.264 la app elegida. Esa app se puede traer al móvil para escribir un destino y
 devolver después a la moto.
 
+La app está en español y en inglés: el idioma se elige abajo en la pantalla principal (por
+defecto, español).
+
 > **Proyecto no oficial.** No tiene relación con ningún fabricante de motos, ni con EasyConn ni Carbit. Solo se ha probado con
 > una moto y unos pocos móviles. Úsalo bajo tu responsabilidad y prueba siempre con la moto parada.
 

@@ -87,7 +87,7 @@ class Moto private constructor(private val context: Context) {
         }
         ShellLink.onLost = {
             if (running.value) {
-                toast("ADB se ha parado: la moto se queda sin imagen. Vuelve a pulsar Conectar.")
+                toast(text(R.string.adb_lost))
                 stop()
             }
         }
@@ -102,8 +102,8 @@ class Moto private constructor(private val context: Context) {
     fun connect() {
         if (running.value || waitingForAdb.value) return
         whyNot()?.let {
-            log("no se conecta: $it")
-            toast(it)
+            log("no se conecta: ${Language.spanish(context, it)}")
+            toast(text(it))
             return
         }
         ShellLink.refresh()
@@ -119,17 +119,17 @@ class Moto private constructor(private val context: Context) {
     }
 
     /** What keeps the bike from being found before even trying, said so it can be put right. */
-    private fun whyNot(): String? {
+    private fun whyNot(): Int? {
         val wifi = context.getSystemService(Context.WIFI_SERVICE) as WifiManager?
-        if (wifi?.isWifiEnabled != true) return "Enciende el wifi del móvil: la moto se conecta por wifi directo."
+        if (wifi?.isWifiEnabled != true) return R.string.wifi_off
         // Before Android 13, looking for wifi devices needs the location on.
         if (Build.VERSION.SDK_INT < 33) {
             val location = context.getSystemService(Context.LOCATION_SERVICE) as LocationManager?
             if (location == null || !LocationManagerCompat.isLocationEnabled(location)) {
-                return "Enciende la ubicación: en este Android hace falta para encontrar la moto."
+                return R.string.location_off
             }
         }
-        if (chosenComponent() == null) return "La app elegida ya no está instalada. Elige otra."
+        if (chosenComponent() == null) return R.string.app_gone_choose
         return null
     }
 
@@ -137,7 +137,7 @@ class Moto private constructor(private val context: Context) {
     private val adbTooSlow = Runnable {
         if (!waitingForAdb.value) return@Runnable
         log("ADB no se ha puesto en marcha en ${WAIT_ADB_MS / 60_000} min: se deja de esperar")
-        toast("ADB no arranca: se deja de esperar. Revisa la pantalla ADB.")
+        toast(text(R.string.adb_too_slow))
         cancelWaiting()
     }
 
@@ -243,7 +243,7 @@ class Moto private constructor(private val context: Context) {
     private val giveUp = Runnable {
         if (!running.value || state.value == BikeState.SHOWING) return@Runnable
         log("sin moto en ${lookedForMs / 60_000} min: se deja de buscar")
-        toast("No aparece la moto: se deja de buscar.")
+        toast(text(R.string.bike_not_found))
         stop()
     }
     private var lookedForMs = 0L
@@ -300,7 +300,7 @@ class Moto private constructor(private val context: Context) {
         } catch (e: IOException) {
             // Carbit and OffNavigator listen on the very same ports, and only one can have them.
             log("no se pueden abrir los puertos (${e.message}). Si Carbit u OffNavigator están abiertos, ciérralos del todo y vuelve a probar.")
-            toast("Puertos ocupados: cierra Carbit u OffNavigator del todo.")
+            toast(text(R.string.ports_taken))
             events.retired = true
             thread(isDaemon = true) { opened.close() }
             stop()
@@ -323,7 +323,7 @@ class Moto private constructor(private val context: Context) {
                 if (retired || !running.value) return@post
                 if (state == BikeState.SHOWING && this@Moto.state.value != BikeState.SHOWING) {
                     main.removeCallbacks(giveUp)
-                    toast("Conectado: la app está en la moto.")
+                    toast(text(R.string.connected))
                 }
                 this@Moto.state.value = state
             }
@@ -347,7 +347,7 @@ class Moto private constructor(private val context: Context) {
     private fun bikeLeft() {
         if (!running.value) return
         log("la moto se ha ido (¿apagada?): se la vuelve a buscar")
-        toast("La moto se ha desconectado. Si vuelve en ${AFTER_LEFT_MS / 60_000} min, se conecta sola.")
+        toast(text(R.string.bike_left, AFTER_LEFT_MS / 60_000))
         giveUpIn(AFTER_LEFT_MS)
         closeAttempt()
         state.value = BikeState.LISTENING
@@ -417,7 +417,7 @@ class Moto private constructor(private val context: Context) {
     fun share(activity: Context) {
         try {
             if (!file.exists() || file.length() == 0L) {
-                toast("Todavía no hay registro de la moto.")
+                toast(text(R.string.no_log))
                 return
             }
             val exports = File(activity.cacheDir, "exports").apply { mkdirs() }
@@ -432,9 +432,9 @@ class Moto private constructor(private val context: Context) {
                 clipData = ClipData.newRawUri(name, uri)
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
-            activity.startActivity(Intent.createChooser(send, "Enviar registro de la moto"))
+            activity.startActivity(Intent.createChooser(send, text(R.string.send_log)))
         } catch (e: Exception) {
-            toast("No se pudo enviar el registro: ${e.message}")
+            toast(text(R.string.send_log_failed, e.message ?: e.javaClass.simpleName))
         }
     }
 
@@ -463,6 +463,8 @@ class Moto private constructor(private val context: Context) {
             }
         }
     }
+
+    private fun text(id: Int, vararg args: Any) = Language.text(context, id, *args)
 
     private fun toast(text: String) = main.post { Toast.makeText(context, text, Toast.LENGTH_LONG).show() }
 

@@ -40,9 +40,11 @@ class PairingService : Service() {
     private val giveUp = object : Runnable {
         override fun run() {
             // A code did come: give the pairing under way the time it needs.
-            if (pairing) main.postDelayed(this, 60_000L) else finish(TIMEOUT)
+            if (pairing) main.postDelayed(this, 60_000L) else finish(getString(R.string.pair_timeout))
         }
     }
+
+    override fun attachBaseContext(base: Context) = super.attachBaseContext(Language.wrap(base))
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -62,7 +64,7 @@ class PairingService : Service() {
             ServiceCompat.startForeground(this, NOTIF_ID, waiting(), ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
         } catch (e: Exception) {
             e.printStackTrace()
-            Toast.makeText(this, "No se pudo mostrar el aviso para el código. Empareja a mano, con pantalla dividida.", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, R.string.pair_notice_failed, Toast.LENGTH_LONG).show()
             stopSelf()
             return
         }
@@ -82,7 +84,7 @@ class PairingService : Service() {
         port = latest
         if (port > 0) {
             problem = null
-            show(notice("Escribe aquí el código de 6 cifras que muestra Android. No cierres su diálogo.", ask = true, alert = true))
+            show(notice(getString(R.string.pair_type_code), ask = true, alert = true))
         } else {
             show(waiting())
         }
@@ -92,35 +94,35 @@ class PairingService : Service() {
         if (pairing) return
         if (mdns == null) {
             // The app was closed meanwhile and Android started this again just for the answer.
-            show(notice("Motocom se cerró mientras esperaba. Vuelve a la app y pulsa Emparejar.", ask = false, done = true))
+            show(notice(getString(R.string.pair_app_closed), ask = false, done = true))
             stopSelf()
             return
         }
         val code = RemoteInput.getResultsFromIntent(intent)?.getCharSequence(KEY_CODE)?.filter(Char::isDigit)?.toString().orEmpty()
         if (port <= 0) return show(waiting())
-        if (code.length != 6) return show(notice("El código tiene 6 cifras. Escríbelo otra vez.", ask = true))
+        if (code.length != 6) return show(notice(getString(R.string.pair_code_length), ask = true))
         pairing = true
-        show(notice("Emparejando…", ask = false, cancel = false))
+        show(notice(getString(R.string.pairing), ask = false, cancel = false))
         val used = port
         val mine = session
-        val accepted = ShellLink.pairAndStart(used, code) { text ->
+        val accepted = ShellLink.pairAndStart(used, code) { said, failed ->
             if (mine != session) return@pairAndStart
             pairing = false
             when {
-                ShellLink.ready -> finish("ADB listo. Ya puedes volver a Motocom.")
-                text.startsWith("Error") -> {
+                ShellLink.ready -> finish(getString(R.string.pair_done))
+                failed -> {
                     // The library's reasons are in English; the app's log keeps them.
-                    problem = "No se pudo emparejar: el código no era el correcto o el diálogo se cerró."
+                    problem = getString(R.string.pair_wrong)
                     // The dialog has usually closed by now; a new one gives a new port.
                     port = -1
                     if (latest > 0 && latest != used) onPort(latest) else show(waiting())
                 }
-                else -> finish(text)
+                else -> finish(said.read(this))
             }
         }
         if (!accepted) {
             pairing = false
-            show(notice("Motocom está ocupada. Espera un momento y vuelve a escribir el código.", ask = true))
+            show(notice(getString(R.string.pair_busy), ask = true))
         }
     }
 
@@ -158,7 +160,7 @@ class PairingService : Service() {
     }
 
     private fun waiting(): Notification {
-        val ask = "En Depuración inalámbrica, toca «Vincular dispositivo con código» (en Xiaomi, «Emparejar dispositivo con código de sincronización»)."
+        val ask = getString(R.string.pair_open_dialog)
         return notice(problem?.let { "$it\n$ask" } ?: ask, ask = false)
     }
 
@@ -167,23 +169,11 @@ class PairingService : Service() {
         (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).notify(id, notification)
     }
 
-    private fun createChannel() {
-        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        if (nm.getNotificationChannel(CHANNEL_ID) == null) {
-            nm.createNotificationChannel(
-                // High, so the question drops down over Settings by itself.
-                NotificationChannel(CHANNEL_ID, "Emparejar ADB", NotificationManager.IMPORTANCE_HIGH).apply {
-                    description = "Pide el código de emparejamiento sin salir de Ajustes"
-                    setSound(null, null)
-                    setShowBadge(false)
-                }
-            )
-        }
-    }
+    private fun createChannel() = createChannel(this)
 
     private fun notice(text: String, ask: Boolean, alert: Boolean = false, done: Boolean = false, cancel: Boolean = true): Notification {
         val builder = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle(if (done) "Motocom" else "Emparejar Motocom")
+            .setContentTitle(if (done) "Motocom" else getString(R.string.pair_notice_title))
             .setContentText(text)
             .setStyle(NotificationCompat.BigTextStyle().bigText(text))
             .setSmallIcon(R.drawable.ic_moto)
@@ -206,9 +196,9 @@ class PairingService : Service() {
                 Intent(this, PairingService::class.java).setAction(ACTION_CODE),
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE
             )
-            val input = RemoteInput.Builder(KEY_CODE).setLabel("Código de 6 cifras").build()
+            val input = RemoteInput.Builder(KEY_CODE).setLabel(getString(R.string.six_digit_code)).build()
             builder.addAction(
-                NotificationCompat.Action.Builder(0, "Escribir código", send)
+                NotificationCompat.Action.Builder(0, getString(R.string.type_code), send)
                     .addRemoteInput(input).setAllowGeneratedReplies(false).build()
             )
         }
@@ -218,7 +208,7 @@ class PairingService : Service() {
             Intent(this, PairingService::class.java).setAction(ACTION_STOP),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
-        return builder.addAction(0, "Cancelar", stop).build()
+        return builder.addAction(0, getString(R.string.cancel), stop).build()
     }
 
     companion object {
@@ -229,10 +219,22 @@ class PairingService : Service() {
         private const val NOTIF_ID = 45
         private const val DONE_ID = 46
         private const val TIME_LIMIT = 10 * 60_000L
-        private const val TIMEOUT = "No llegó ningún código en 10 minutos. Vuelve a Motocom y pulsa Emparejar otra vez."
 
         /** True while a notice is waiting for the dialog or the code. */
         val searching = mutableStateOf(false)
+
+        /** Made again on every start of the app too: only the name and description change then, to its language. */
+        fun createChannel(context: Context) {
+            val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            nm.createNotificationChannel(
+                // High, so the question drops down over Settings by itself.
+                NotificationChannel(CHANNEL_ID, Language.text(context, R.string.pair_channel), NotificationManager.IMPORTANCE_HIGH).apply {
+                    description = Language.text(context, R.string.pair_channel_description)
+                    setSound(null, null)
+                    setShowBadge(false)
+                }
+            )
+        }
 
         fun start(context: Context) =
             ContextCompat.startForegroundService(context, Intent(context, PairingService::class.java))

@@ -2,10 +2,12 @@ package com.motocom
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.graphics.Color as AndroidColor
+import android.graphics.drawable.ColorDrawable
 import android.net.Uri
 import android.os.Bundle
 import android.os.PowerManager
@@ -75,6 +77,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
@@ -129,7 +133,7 @@ class MainActivity : ComponentActivity() {
         if (granted) {
             scan()
         } else {
-            Toast.makeText(this, "Sin cámara no se puede leer el QR. Permítela en Ajustes → Apps → Motocom → Permisos.", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, R.string.no_camera, Toast.LENGTH_LONG).show()
             if (!shouldShowRequestPermissionRationale(Manifest.permission.CAMERA)) openAppSettings()
         }
     }
@@ -141,11 +145,11 @@ class MainActivity : ComponentActivity() {
     private val scanQr = registerForActivityResult(ScanContract()) { result ->
         val text = result.contents ?: return@registerForActivityResult
         if (!moto.readQr(text)) {
-            Toast.makeText(this, "Ese código no es el de la pantalla de una moto.", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, R.string.not_bike_qr, Toast.LENGTH_LONG).show()
             return@registerForActivityResult
         }
         // Not connecting by itself: the app and its size are to be chosen first.
-        Toast.makeText(this, "Moto vinculada.", Toast.LENGTH_SHORT).show()
+        Toast.makeText(this, R.string.bike_linked, Toast.LENGTH_SHORT).show()
     }
 
     private fun readQr() {
@@ -155,10 +159,12 @@ class MainActivity : ComponentActivity() {
 
     private fun scan() = scanQr.launch(ScanOptions().apply {
         setDesiredBarcodeFormats(ScanOptions.QR_CODE)
-        setPrompt("Apunta al código QR de la pantalla de la moto")
+        setPrompt(getString(R.string.scan_prompt))
         setBeepEnabled(false)
         setOrientationLocked(false)
     })
+
+    override fun attachBaseContext(newBase: Context) = super.attachBaseContext(Language.wrap(newBase))
 
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge(
@@ -166,7 +172,11 @@ class MainActivity : ComponentActivity() {
             navigationBarStyle = SystemBarStyle.dark(AndroidColor.TRANSPARENT)
         )
         super.onCreate(savedInstanceState)
+        // The theme's own grey would show behind the system bars when the language change recreates the screen.
+        window.setBackgroundDrawable(ColorDrawable(Palette.Background.toArgb()))
         moto = Moto.get(this)
+        BikeService.createChannel(this)
+        PairingService.createChannel(this)
         pickDefaultApp()
         setContent {
             MotocomTheme {
@@ -196,7 +206,7 @@ class MainActivity : ComponentActivity() {
         batteryFree.value = ignoringBatteryOptimizations()
         if (moto.missingPermissions().isEmpty()) refused.value = false
         if (!moto.running.value && moto.forgetMissingApp()) {
-            Toast.makeText(this, "La app elegida ya no está instalada.", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, R.string.app_gone, Toast.LENGTH_LONG).show()
             pickDefaultApp()
         }
     }
@@ -238,9 +248,10 @@ class MainActivity : ComponentActivity() {
         val adbReady = ShellLink.status.value == ShellLink.Status.READY
         val paired by ShellLink.paired
         val adbBusy by ShellLink.busy
-        val adbFailed = !adbBusy && ShellLink.message.value.startsWith(ADB_ERROR)
+        val adbFailed = !adbBusy && ShellLink.failed.value
+        val adbMessage = ShellLink.message.value?.read(this).orEmpty()
         val adbMissing = !adbReady && !paired
-        val sizeName = SIZES.firstOrNull { it.first == dpi }?.second ?: "$dpi ppp"
+        val sizeName = SIZES.firstOrNull { it.first == dpi }?.let { stringResource(it.second) } ?: stringResource(R.string.size_dpi, dpi)
         val appName = chosen?.let(::label)
         var picking by rememberSaveable { mutableStateOf(false) }
         var showBike by rememberSaveable { mutableStateOf(false) }
@@ -251,7 +262,7 @@ class MainActivity : ComponentActivity() {
                 appIcon(packageName)?.let { Image(it, null, Modifier.size(36.dp).clip(RoundedCornerShape(10.dp))) }
             }) {
                 AdbChip(adbReady, paired, adbBusy, waiting && adbFailed, openAdb)
-                IconButton(onClick = openLog) { Icon(Icons.Log, "Registro") }
+                IconButton(onClick = openLog) { Icon(Icons.Log, stringResource(R.string.log)) }
             }
             Column(
                 Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = 16.dp),
@@ -260,79 +271,90 @@ class MainActivity : ComponentActivity() {
                 when {
                     // A failed start leaves Connect waiting: say so here, not only on the ADB screen.
                     waiting && adbFailed -> StatusPanel(
-                        Tone.BAD, "No se ha podido iniciar ADB",
-                        ShellLink.message.value.removePrefix(ADB_ERROR).trim(), Icons.Warning
+                        Tone.BAD, stringResource(R.string.status_adb_failed), adbMessage, Icons.Warning
                     )
                     waiting -> StatusPanel(
-                        Tone.NEUTRAL, "Iniciando ADB…",
-                        if (adbBusy) "${ShellLink.message.value} La moto se conectará en cuanto esté listo."
-                        else "La moto se conectará en cuanto ADB esté listo.",
+                        Tone.NEUTRAL, stringResource(R.string.status_adb_starting),
+                        if (adbBusy) stringResource(R.string.status_adb_starting_busy, adbMessage)
+                        else stringResource(R.string.status_adb_starting_idle),
                         Icons.Code, working = true
                     )
                     running && state == BikeState.SHOWING && place == AppPlace.PHONE -> StatusPanel(
-                        Tone.WARN, "La app está en el móvil",
-                        "La moto no la ve. Cuando termines de escribir, pulsa «A la moto».", Icons.Phone
+                        Tone.WARN, stringResource(R.string.status_on_phone),
+                        stringResource(R.string.status_on_phone_detail), Icons.Phone
                     )
                     running && state == BikeState.SHOWING && place == AppPlace.NOWHERE -> StatusPanel(
-                        Tone.WARN, "La app no ha llegado a la moto",
-                        "La moto está conectada, pero ${appName ?: "la app"} no se ha podido llevar. Pulsa «A la moto» para reintentar.",
+                        Tone.WARN, stringResource(R.string.status_nowhere),
+                        stringResource(R.string.status_nowhere_detail, appName ?: stringResource(R.string.the_app_lower)),
                         Icons.Warning
                     )
                     running && state == BikeState.SHOWING -> StatusPanel(
-                        Tone.GOOD, "En la moto",
-                        "${appName ?: "La app"} se ve en la moto. " + if (Build.VERSION.SDK_INT >= 33) "Ya puedes bloquear el móvil."
-                            else "En este Android no bloquees el móvil: la imagen se pararía.",
+                        Tone.GOOD, stringResource(R.string.status_on_bike),
+                        stringResource(
+                            if (Build.VERSION.SDK_INT >= 33) R.string.status_on_bike_lock else R.string.status_on_bike_no_lock,
+                            appName ?: stringResource(R.string.the_app)
+                        ),
                         Icons.Check
                     )
                     running && state == BikeState.GREETED ->
-                        StatusPanel(Tone.NEUTRAL, "Preparando la imagen…", "La moto ha respondido.", Icons.Navigation, working = true)
+                        StatusPanel(
+                            Tone.NEUTRAL, stringResource(R.string.status_preparing),
+                            stringResource(R.string.status_preparing_detail), Icons.Navigation, working = true
+                        )
                     running -> StatusPanel(
-                        Tone.NEUTRAL, "Buscando la moto…",
-                        "Abre la conexión con el móvil en la pantalla de la moto. Wifi y ubicación, encendidos.",
+                        Tone.NEUTRAL, stringResource(R.string.status_searching),
+                        stringResource(R.string.status_searching_detail),
                         Icons.Navigation, working = true
                     )
                     refused.value -> StatusPanel(
-                        Tone.BAD, "Falta un permiso",
-                        if (Build.VERSION.SDK_INT >= 33) "Sin «Dispositivos cercanos» el móvil no puede encontrar el wifi de la moto."
-                        else "Sin «Ubicación exacta» este Android no deja encontrar el wifi de la moto. Motocom no lee tu ubicación.",
+                        Tone.BAD, stringResource(R.string.status_permission),
+                        stringResource(if (Build.VERSION.SDK_INT >= 33) R.string.status_permission_nearby else R.string.status_permission_location),
                         Icons.Warning
                     )
-                    adbMissing -> StatusPanel(Tone.WARN, "Falta configurar ADB", "Solo hace falta la primera vez.", Icons.Code)
-                    bike == null -> StatusPanel(Tone.NEUTRAL, "Vincula tu moto", "Lee el código QR que aparece en su pantalla.", Icons.Qr)
-                    chosen == null -> StatusPanel(Tone.NEUTRAL, "Elige una app", "La que quieres ver en la moto.", Icons.Navigation)
-                    else -> StatusPanel(Tone.GOOD, "Listo para conectar", "Enciende la moto y abre en su pantalla la conexión con el móvil.", Icons.Check)
+                    adbMissing -> StatusPanel(
+                        Tone.WARN, stringResource(R.string.status_adb_missing), stringResource(R.string.status_adb_missing_detail), Icons.Code
+                    )
+                    bike == null -> StatusPanel(
+                        Tone.NEUTRAL, stringResource(R.string.status_no_bike), stringResource(R.string.status_no_bike_detail), Icons.Qr
+                    )
+                    chosen == null -> StatusPanel(
+                        Tone.NEUTRAL, stringResource(R.string.status_no_app), stringResource(R.string.status_no_app_detail), Icons.Navigation
+                    )
+                    else -> StatusPanel(
+                        Tone.GOOD, stringResource(R.string.status_ready), stringResource(R.string.status_ready_detail), Icons.Check
+                    )
                 }
 
-                Section(if (running) "En la moto" else "Conexión") {
+                Section(stringResource(if (running) R.string.status_on_bike else R.string.section_connection)) {
                     ListRow(
                         leading = { IconBadge(Icons.Qr) },
-                        title = "Moto",
-                        value = bike?.name ?: "Sin vincular · leer QR",
+                        title = stringResource(R.string.row_bike),
+                        value = bike?.name ?: stringResource(R.string.row_bike_none),
                         onClick = { if (bike == null) readQr() else showBike = true },
-                        clickLabel = if (bike == null) "Leer QR" else "Ver datos de la moto"
+                        clickLabel = stringResource(if (bike == null) R.string.read_qr else R.string.show_bike)
                     )
                     RowDivider()
                     ListRow(
                         leading = { AppIcon(chosen) },
-                        title = "App",
-                        value = appName ?: "Elegir app",
+                        title = stringResource(R.string.row_app),
+                        value = appName ?: stringResource(R.string.choose_app),
                         onClick = if (running) null else ({ picking = true }),
-                        clickLabel = "Cambiar app"
+                        clickLabel = stringResource(R.string.change_app)
                     )
                     if (running) {
                         RowDivider()
                         ListRow(
                             leading = { IconBadge(Icons.Lock, Palette.Muted) },
-                            title = "Tamaño",
-                            value = "$sizeName · desconecta para cambiarlo",
+                            title = stringResource(R.string.row_size),
+                            value = stringResource(R.string.row_size_locked, sizeName),
                             onClick = null
                         )
                     }
                 }
 
                 if (refused.value && !running) {
-                    Callout("Concede el permiso en Ajustes y vuelve a pulsar Conectar.", Tone.BAD) {
-                        TextButton(onClick = ::openAppSettings) { Text("Ajustes") }
+                    Callout(stringResource(R.string.permission_callout), Tone.BAD) {
+                        TextButton(onClick = ::openAppSettings) { Text(stringResource(R.string.settings)) }
                     }
                 }
 
@@ -343,13 +365,13 @@ class MainActivity : ComponentActivity() {
                 }
 
                 if (!batteryFree.value) {
-                    Callout(
-                        "El ahorro de batería puede cortar la imagen con el móvil bloqueado.",
-                        Tone.WARN
-                    ) {
-                        TextButton(onClick = ::askBatteryExemption) { Text("Permitir") }
+                    Callout(stringResource(R.string.battery_callout), Tone.WARN) {
+                        TextButton(onClick = ::askBatteryExemption) { Text(stringResource(R.string.allow)) }
                     }
                 }
+
+                // Hidden while anything is under way, whose notices and messages are in the language it began with.
+                if (!running && !waiting && !adbBusy && !PairingService.searching.value) LanguageChooser()
                 Spacer(Modifier.height(4.dp))
             }
 
@@ -369,41 +391,44 @@ class MainActivity : ComponentActivity() {
     @Composable
     private fun AdbChip(ready: Boolean, paired: Boolean, busy: Boolean, failed: Boolean, onClick: () -> Unit) {
         val (color, text) = when {
-            ready -> Palette.Good to "ADB activo"
-            busy -> Palette.Primary to "Iniciando ADB…"
-            failed -> Palette.Bad to "Error de ADB"
-            paired -> Palette.Muted to "ADB parado"
-            else -> Palette.Warn to "Configurar ADB"
+            ready -> Palette.Good to R.string.adb_chip_on
+            busy -> Palette.Primary to R.string.status_adb_starting
+            failed -> Palette.Bad to R.string.adb_chip_error
+            paired -> Palette.Muted to R.string.adb_chip_stopped
+            else -> Palette.Warn to R.string.adb_setup
         }
         Row(
             Modifier.heightIn(min = 48.dp).clip(CircleShape).background(Palette.SurfaceHigh)
-                .clickable(onClickLabel = "Abrir ajustes de ADB", role = Role.Button, onClick = onClick)
+                .clickable(onClickLabel = stringResource(R.string.open_adb), role = Role.Button, onClick = onClick)
                 .padding(horizontal = 14.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Box(Modifier.size(8.dp).clip(CircleShape).background(color))
             Spacer(Modifier.width(8.dp))
-            Text(text, style = MaterialTheme.typography.labelLarge)
+            Text(stringResource(text), style = MaterialTheme.typography.labelLarge)
         }
     }
 
     /** How big the app looks on the bike, which can only be set before connecting. */
     @Composable
     private fun SizeChooser(dpi: Int) {
-        Section("Tamaño en la moto") {
+        Section(stringResource(R.string.section_size)) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     BikeScreenPreview(dpi, Modifier.width(96.dp))
                     Spacer(Modifier.width(16.dp))
                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        val (_, name, note) = SIZES.firstOrNull { it.first == dpi } ?: Triple(dpi, "$dpi ppp", "")
-                        Text(name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                        Text(note, style = MaterialTheme.typography.bodyMedium, color = Palette.Muted)
-                        Text("No cambia la pantalla del móvil.", style = MaterialTheme.typography.bodySmall, color = Palette.Muted)
+                        val size = SIZES.firstOrNull { it.first == dpi }
+                        Text(
+                            size?.let { stringResource(it.second) } ?: stringResource(R.string.size_dpi, dpi),
+                            style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold
+                        )
+                        if (size != null) Text(stringResource(size.third), style = MaterialTheme.typography.bodyMedium, color = Palette.Muted)
+                        Text(stringResource(R.string.size_phone_unchanged), style = MaterialTheme.typography.bodySmall, color = Palette.Muted)
                     }
                 }
                 Segmented(
-                    options = SIZES.map { it.second },
+                    options = SIZES.map { stringResource(it.second) },
                     selected = SIZES.indexOfFirst { it.first == dpi },
                     enabled = true
                 ) { moto.setDpi(SIZES[it].first) }
@@ -411,13 +436,34 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /** Each language named in itself, so it can be found whichever one is on. */
+    @Composable
+    private fun LanguageChooser() {
+        val current = Language.current(this)
+        Section(stringResource(R.string.section_language)) {
+            Column(Modifier.padding(16.dp)) {
+                Segmented(
+                    options = listOf("Español", "English"),
+                    selected = Language.ALL.indexOf(current),
+                    enabled = true
+                ) {
+                    val chosen = Language.ALL[it]
+                    if (chosen != current) {
+                        Language.set(this@MainActivity, chosen)
+                        recreate()
+                    }
+                }
+            }
+        }
+    }
+
     /** While on the bike: bring the app over to type a destination, then send it back. */
     @Composable
     private fun MoveApp(place: AppPlace) {
-        Section("Escribir un destino") {
+        Section(stringResource(R.string.section_destination)) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text(
-                    "Trae la app al móvil para escribir y devuélvela a la moto al terminar.",
+                    stringResource(R.string.destination_text),
                     style = MaterialTheme.typography.bodyMedium,
                     color = Palette.Muted
                 )
@@ -425,12 +471,12 @@ class MainActivity : ComponentActivity() {
                     FilledTonalButton(onClick = { moto.toPhone() }, Modifier.weight(1f).height(52.dp), enabled = place == AppPlace.BIKE, shape = RoundedCornerShape(16.dp)) {
                         Icon(Icons.Phone, null, Modifier.size(18.dp))
                         Spacer(Modifier.width(8.dp))
-                        Text("Al móvil")
+                        Text(stringResource(R.string.to_phone))
                     }
                     FilledTonalButton(onClick = { moto.toBike() }, Modifier.weight(1f).height(52.dp), enabled = place != AppPlace.BIKE, shape = RoundedCornerShape(16.dp)) {
                         Icon(Icons.Navigation, null, Modifier.size(18.dp))
                         Spacer(Modifier.width(8.dp))
-                        Text("A la moto")
+                        Text(stringResource(R.string.to_bike))
                     }
                 }
             }
@@ -452,29 +498,29 @@ class MainActivity : ComponentActivity() {
             when {
                 waiting && adbFailed -> {
                     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        OutlinedButton(onClick = moto::cancelWaiting, Modifier.weight(1f).height(56.dp), shape = shape) { Text("Cancelar", fontSize = 16.sp) }
-                        Button(onClick = ShellLink::quickStart, Modifier.weight(1f).height(56.dp), shape = shape) { Text("Reintentar", fontSize = 16.sp) }
+                        OutlinedButton(onClick = moto::cancelWaiting, Modifier.weight(1f).height(56.dp), shape = shape) { Text(stringResource(R.string.cancel), fontSize = 16.sp) }
+                        Button(onClick = ShellLink::quickStart, Modifier.weight(1f).height(56.dp), shape = shape) { Text(stringResource(R.string.retry), fontSize = 16.sp) }
                     }
-                    TextButton(onClick = openAdb, Modifier.fillMaxWidth()) { Text("Ajustes de ADB") }
+                    TextButton(onClick = openAdb, Modifier.fillMaxWidth()) { Text(stringResource(R.string.adb_settings)) }
                 }
                 waiting -> {
-                    Callout(SIZE_WARNING)
-                    OutlinedButton(onClick = moto::cancelWaiting, big, shape = shape) { Text("Cancelar", fontSize = 16.sp) }
+                    Callout(stringResource(R.string.size_warning))
+                    OutlinedButton(onClick = moto::cancelWaiting, big, shape = shape) { Text(stringResource(R.string.cancel), fontSize = 16.sp) }
                 }
                 running -> OutlinedButton(
                     onClick = moto::stop, big, shape = shape,
                     colors = ButtonDefaults.outlinedButtonColors(contentColor = Palette.Bad)
-                ) { Text("Desconectar", fontSize = 16.sp) }
-                adbMissing -> Button(onClick = openAdb, big, shape = shape) { Text("Configurar ADB", fontSize = 16.sp) }
+                ) { Text(stringResource(R.string.disconnect), fontSize = 16.sp) }
+                adbMissing -> Button(onClick = openAdb, big, shape = shape) { Text(stringResource(R.string.adb_setup), fontSize = 16.sp) }
                 !hasBike -> Button(onClick = ::readQr, big, shape = shape) {
                     Icon(Icons.Qr, null, Modifier.size(20.dp))
                     Spacer(Modifier.width(10.dp))
-                    Text("Leer QR de la moto", fontSize = 16.sp)
+                    Text(stringResource(R.string.read_bike_qr), fontSize = 16.sp)
                 }
-                !hasApp -> Button(onClick = pickApp, big, shape = shape) { Text("Elegir app", fontSize = 16.sp) }
+                !hasApp -> Button(onClick = pickApp, big, shape = shape) { Text(stringResource(R.string.choose_app), fontSize = 16.sp) }
                 else -> {
-                    Callout(SIZE_WARNING)
-                    Button(onClick = ::connect, big, shape = shape) { Text("Conectar", fontSize = 16.sp, fontWeight = FontWeight.SemiBold) }
+                    Callout(stringResource(R.string.size_warning))
+                    Button(onClick = ::connect, big, shape = shape) { Text(stringResource(R.string.connect), fontSize = 16.sp, fontWeight = FontWeight.SemiBold) }
                 }
             }
         }
@@ -503,20 +549,20 @@ class MainActivity : ComponentActivity() {
         AlertDialog(
             onDismissRequest = onDismiss,
             containerColor = Palette.SurfaceHigh,
-            title = { Text("Tu moto") },
+            title = { Text(stringResource(R.string.your_bike)) },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    BikeField("Nombre", bike.name)
-                    BikeField("Wifi", bike.ssid)
-                    BikeField("Contraseña", bike.password.ifEmpty { "—" })
-                    if (bike.model.isNotEmpty()) BikeField("Modelo", bike.model)
-                    if (bike.serial.isNotEmpty()) BikeField("Nº de serie", bike.serial)
+                    BikeField(stringResource(R.string.bike_name), bike.name)
+                    BikeField(stringResource(R.string.bike_wifi), bike.ssid)
+                    BikeField(stringResource(R.string.bike_password), bike.password.ifEmpty { "—" })
+                    if (bike.model.isNotEmpty()) BikeField(stringResource(R.string.bike_model), bike.model)
+                    if (bike.serial.isNotEmpty()) BikeField(stringResource(R.string.bike_serial), bike.serial)
                 }
             },
             confirmButton = {
-                TextButton(onClick = { onDismiss(); readQr() }, enabled = !running) { Text("Leer otro QR") }
+                TextButton(onClick = { onDismiss(); readQr() }, enabled = !running) { Text(stringResource(R.string.read_other_qr)) }
             },
-            dismissButton = { TextButton(onClick = onDismiss) { Text("Cerrar") } }
+            dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.close)) } }
         )
     }
 
@@ -535,8 +581,8 @@ class MainActivity : ComponentActivity() {
         val list = rememberLazyListState()
         LaunchedEffect(lines.size) { if (lines.isNotEmpty()) list.scrollToItem(lines.size - 1) }
         Column(Modifier.fillMaxSize()) {
-            TopBar("Registro", onBack = onBack) {
-                IconButton(onClick = { moto.share(this@MainActivity) }) { Icon(Icons.Share, "Compartir registro") }
+            TopBar(stringResource(R.string.log), onBack = onBack) {
+                IconButton(onClick = { moto.share(this@MainActivity) }) { Icon(Icons.Share, stringResource(R.string.share_log)) }
             }
             Surface(
                 Modifier.weight(1f).fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 16.dp),
@@ -545,7 +591,7 @@ class MainActivity : ComponentActivity() {
             ) {
                 if (lines.isEmpty()) {
                     Box(contentAlignment = Alignment.Center) {
-                        Text("Todavía no hay nada.", color = Palette.Muted)
+                        Text(stringResource(R.string.log_empty), color = Palette.Muted)
                     }
                 } else {
                     LazyColumn(Modifier.padding(12.dp), state = list) {
@@ -566,6 +612,8 @@ class MainActivity : ComponentActivity() {
             value = withContext(Dispatchers.IO) { launchableApps() }
         }.value
         var query by remember { mutableStateOf("") }
+        val pickLabel = stringResource(R.string.pick)
+        val pickedLabel = stringResource(R.string.picked)
         val shown = apps.filter { query.isBlank() || it.second.contains(query.trim(), ignoreCase = true) }
         ModalBottomSheet(
             onDismissRequest = onDismiss,
@@ -573,12 +621,12 @@ class MainActivity : ComponentActivity() {
             containerColor = Palette.Surface
         ) {
             Column(Modifier.padding(horizontal = 16.dp)) {
-                Text("¿Qué app va a la moto?", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+                Text(stringResource(R.string.pick_app_title), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.height(12.dp))
                 OutlinedTextField(
                     query, { query = it },
                     Modifier.fillMaxWidth(),
-                    placeholder = { Text("Buscar") },
+                    placeholder = { Text(stringResource(R.string.search)) },
                     leadingIcon = { Icon(Icons.Search, null) },
                     singleLine = true,
                     shape = RoundedCornerShape(16.dp)
@@ -590,16 +638,16 @@ class MainActivity : ComponentActivity() {
                     val isNav = pkg in NAV_APPS
                     Row(
                         Modifier.fillMaxWidth()
-                            .clickable(onClickLabel = "Elegir", role = Role.Button) { onPick(pkg) }
+                            .clickable(onClickLabel = pickLabel, role = Role.Button) { onPick(pkg) }
                             .padding(horizontal = 16.dp, vertical = 10.dp)
-                            .semantics { if (pkg == chosen) stateDescription = "elegida" },
+                            .semantics { if (pkg == chosen) stateDescription = pickedLabel },
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         AppIcon(pkg)
                         Spacer(Modifier.width(16.dp))
                         Column(Modifier.weight(1f)) {
                             Text(name, style = MaterialTheme.typography.bodyLarge)
-                            if (isNav) Text("Navegación", style = MaterialTheme.typography.bodySmall, color = Palette.Primary)
+                            if (isNav) Text(stringResource(R.string.navigation), style = MaterialTheme.typography.bodySmall, color = Palette.Primary)
                         }
                         if (pkg == chosen) Icon(Icons.Check, null, tint = Palette.Primary)
                     }
@@ -649,7 +697,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun noNotifications() {
-        Toast.makeText(this, "Sin notificaciones no se puede escribir el código desde el aviso. Actívalas para Motocom o empareja a mano.", Toast.LENGTH_LONG).show()
+        Toast.makeText(this, R.string.no_notifications, Toast.LENGTH_LONG).show()
         runCatching {
             startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, packageName))
         }
@@ -660,16 +708,14 @@ class MainActivity : ComponentActivity() {
     }
 
     private companion object {
-        const val ADB_ERROR = "Error ADB:"
         const val KEY_ASKED = "permisos_pedidos"
-        const val SIZE_WARNING = "Elige el tamaño antes de conectar: después no se puede cambiar."
 
         /** Density on the bike's 592 x 816 screen: higher, bigger letters and less map. */
         val SIZES = listOf(
-            Triple(200, "Pequeño", "Cabe más mapa; letras pequeñas."),
-            Triple(240, "Normal", "Equilibrado. Recomendado."),
-            Triple(280, "Grande", "Se lee mejor en marcha."),
-            Triple(320, "Enorme", "Lo más legible, con poco mapa."),
+            Triple(200, R.string.size_small, R.string.size_small_note),
+            Triple(240, R.string.size_normal, R.string.size_normal_note),
+            Triple(280, R.string.size_large, R.string.size_large_note),
+            Triple(320, R.string.size_huge, R.string.size_huge_note),
         )
 
         /** Offered first, in this order; the first one installed is chosen the first time. */

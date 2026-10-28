@@ -45,6 +45,7 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
@@ -53,6 +54,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.motocom.R
 
 enum class Tone(val color: Color) {
     NEUTRAL(Palette.Primary), GOOD(Palette.Good), WARN(Palette.Warn), BAD(Palette.Bad)
@@ -71,7 +73,7 @@ fun TopBar(
         verticalAlignment = Alignment.CenterVertically
     ) {
         if (onBack != null) {
-            IconButton(onClick = onBack) { Icon(Icons.Back, "Volver") }
+            IconButton(onClick = onBack) { Icon(Icons.Back, stringResource(R.string.back)) }
         } else {
             Spacer(Modifier.width(12.dp))
         }
@@ -245,10 +247,11 @@ fun Segmented(options: List<String>, selected: Int, enabled: Boolean, onSelect: 
 @Composable
 fun BikeScreenPreview(dpi: Int, modifier: Modifier = Modifier) {
     val density by animateFloatAsState(dpi.toFloat(), label = "densidad")
+    val description = stringResource(R.string.size_preview)
     Canvas(
         modifier.aspectRatio(BIKE_WIDTH / BIKE_HEIGHT).clip(RoundedCornerShape(12.dp))
             .border(2.dp, Palette.Outline, RoundedCornerShape(12.dp))
-            .semantics { contentDescription = "Vista previa del tamaño en la pantalla de la moto" }
+            .semantics { contentDescription = description }
     ) {
         // Pixels of this preview per dp of the bike's virtual screen.
         val u = size.width * density / (BIKE_WIDTH * 160f)
