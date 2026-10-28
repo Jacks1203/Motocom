@@ -42,6 +42,8 @@ class BlackEdges(
     private lateinit var window: android.opengl.EGLSurface
     private var program = 0
     private var texture = 0
+    private var uMatrixLocation = 0
+    private var aPositionLocation = 0
     private lateinit var frames: SurfaceTexture
     private val matrix = FloatArray(16)
     @Volatile private var released = false
@@ -89,6 +91,8 @@ class BlackEdges(
             check(EGL14.eglMakeCurrent(egl, window, window, context)) { "EGL no se deja usar" }
 
             program = program(VERTEX, FRAGMENT)
+            uMatrixLocation = GLES20.glGetUniformLocation(program, "matrix")
+            aPositionLocation = GLES20.glGetAttribLocation(program, "position")
             texture = IntArray(1).also { GLES20.glGenTextures(1, it, 0) }[0]
             GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, texture)
             GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
@@ -137,10 +141,9 @@ class BlackEdges(
         GLES20.glUseProgram(program)
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
         GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, texture)
-        GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(program, "matrix"), 1, false, matrix, 0)
-        val position = GLES20.glGetAttribLocation(program, "position")
-        GLES20.glEnableVertexAttribArray(position)
-        GLES20.glVertexAttribPointer(position, 2, GLES20.GL_FLOAT, false, 0, QUAD)
+        GLES20.glUniformMatrix4fv(uMatrixLocation, 1, false, matrix, 0)
+        GLES20.glEnableVertexAttribArray(aPositionLocation)
+        GLES20.glVertexAttribPointer(aPositionLocation, 2, GLES20.GL_FLOAT, false, 0, QUAD)
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
         EGLExt.eglPresentationTimeANDROID(egl, window, at)
         EGL14.eglSwapBuffers(egl, window)

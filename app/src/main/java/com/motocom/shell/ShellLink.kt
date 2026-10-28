@@ -191,7 +191,7 @@ object ShellLink {
         val apk = context.applicationInfo.sourceDir.replace("'", "'\\''")
         // The worker detaches from ADB so changing wifi does not kill the display. When sh exits,
         // adbd kills its process group, so sh waits until setsid has moved the worker out of it.
-        val command = "CLASSPATH='$apk' setsid nohup /system/bin/app_process /system/bin com.motocom.shell.ShellMain $nonce ${context.applicationInfo.uid / 100000} >/dev/null 2>&1 </dev/null & sleep 2"
+        val command = "CLASSPATH='$apk' setsid nohup /system/bin/app_process /system/bin com.motocom.shell.ShellMain $nonce ${context.applicationInfo.uid / 100000} ${context.packageName} >/dev/null 2>&1 </dev/null & sleep 2"
         adb.openStream("exec:$command").use {
             if (!connected.await(15, TimeUnit.SECONDS) || display == null) {
                 // No worker came, so there is none to wait for next time either.

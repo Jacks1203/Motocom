@@ -282,8 +282,8 @@ class BikeWifi(
     private companion object {
         /** The bikes seen so far are named like "HJ-5G-XXXXXX". */
         const val DEFAULT_PREFIX = "HJ-"
-        /** Carbit took seven seconds to get in by asking. */
-        const val PASSWORD_AFTER_MS = 25_000L
+        /** Carbit took seven seconds to get in by asking; 12s gives it ample margin before trying password. */
+        const val PASSWORD_AFTER_MS = 12_000L
         const val LOOK_AGAIN_MS = 30_000L
     }
 

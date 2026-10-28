@@ -103,6 +103,12 @@ class MirrorPicture(
                 setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, 100_000L)
                 // The screen paints at 60 Hz and the bike takes about 30.
                 setFloat(MediaFormat.KEY_MAX_FPS_TO_ENCODER, FPS.toFloat())
+                // Optimizations: real-time priority, lowest latency, zero B-frame reordering delay
+                setInteger(MediaFormat.KEY_PRIORITY, 0)
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                    setInteger(MediaFormat.KEY_LATENCY, 0)
+                }
+                setInteger("max-bframes", 0)
             }
             // Each piece goes into its field as soon as it exists, so stopEncoder lets go of
             // whatever was made if a later step throws.
@@ -319,7 +325,15 @@ class MirrorPicture(
                 if (waitingForWholeFrame) {
                     if (!whole) return
                     waitingForWholeFrame = false
-                    chunks += (header ?: ByteArray(0)) + bytes
+                    val h = header
+                    if (h != null && h.isNotEmpty()) {
+                        val combined = ByteArray(h.size + bytes.size)
+                        System.arraycopy(h, 0, combined, 0, h.size)
+                        System.arraycopy(bytes, 0, combined, h.size, bytes.size)
+                        chunks += combined
+                    } else {
+                        chunks += bytes
+                    }
                 } else {
                     chunks += bytes
                 }
@@ -345,8 +359,8 @@ class MirrorPicture(
     private companion object {
         /** The bike asks frame by frame and leaves the pace to the phone. */
         const val FPS = 30
-        /** About two seconds of frames nobody came for. */
-        const val BACKLOG = 60
+        /** Half a second of frames nobody came for (prevents navigation lag behind reality). */
+        const val BACKLOG = 15
         /** [appOn] when the user took the app to the phone. */
         const val BY_USER = -2
     }

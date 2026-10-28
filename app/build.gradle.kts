@@ -15,8 +15,8 @@ android {
         // the phone locked, Android 13.
         minSdk = 29
         targetSdk = 36
-        versionCode = 13
-        versionName = "0.13"
+        versionCode = 14
+        versionName = "0.14"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         // Lets codigo/moto_falsa.py in through `adb forward`; never in a published build.
         val cableTests = findProperty("cableTests") == "true"
@@ -42,7 +42,12 @@ android {
             buildConfigField("boolean", "CABLE_TESTS", "true")
         }
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
             if (signing != null) signingConfig = signingConfigs.getByName("release")
         }
     }
@@ -57,11 +62,12 @@ android {
         compose = true
         aidl = true
         buildConfig = true
+        resValues = true
     }
 }
 
 kotlin {
-    jvmToolchain(17)
+    jvmToolchain(21)
 }
 
 dependencies {

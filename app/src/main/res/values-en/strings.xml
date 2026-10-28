@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="app_name">Motocom</string>
     <!-- Home screen -->
     <string name="log">Log</string>
     <string name="share_log">Share log</string>
