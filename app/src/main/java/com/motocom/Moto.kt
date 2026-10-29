@@ -69,6 +69,8 @@ class Moto private constructor(private val context: Context) {
     private val stamp = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
     private val day = SimpleDateFormat("dd-MM-yyyy HH:mm:ss", Locale.US)
     private val file = File(context.getExternalFilesDir(null), "moto_log.txt")
+    /** The first seconds of the last picture sent to the bike, sent along with the record. */
+    private val video = File(context.getExternalFilesDir(null), "moto_video.h264")
 
     /** Connect was pressed before ADB was up: it connects by itself as soon as it is. */
     val waitingForAdb = mutableStateOf(false)
@@ -253,10 +255,10 @@ class Moto private constructor(private val context: Context) {
         appPlace.value = AppPlace.NOWHERE
         ShellLink.bind()
         var made: MirrorPicture? = null
-        made = MirrorPicture(::log, ::chosenComponent, { dpi.intValue }) { place ->
+        made = MirrorPicture(::log, ::chosenComponent, { dpi.intValue }, { place ->
             // A picture let go of says so late; only the current one speaks for the run.
             main.post { if (running.value && picture === made) appPlace.value = place }
-        }
+        }, video)
         picture = made
         reportSince = System.currentTimeMillis() - REPORT_BEFORE_MS
         shownThisRun = false
@@ -552,11 +554,25 @@ class Moto private constructor(private val context: Context) {
             val name = "registro-moto-${SimpleDateFormat("yyyyMMdd-HHmm", Locale.US).format(Date())}.txt"
             val out = File(exports, name).apply { writeBytes(synchronized(file) { file.readBytes() }) }
             val uri = FileProvider.getUriForFile(activity, "${activity.packageName}.fileprovider", out)
-            val send = Intent(Intent.ACTION_SEND).apply {
-                type = "text/plain"
-                putExtra(Intent.EXTRA_STREAM, uri)
+            // What went to the bike, if anything did: played on a computer it shows the picture.
+            val clip = video.takeIf { it.length() > 0 }?.let {
+                val copy = File(exports, name.replace("registro-moto", "video-moto").replace(".txt", ".h264"))
+                it.copyTo(copy, overwrite = true)
+                FileProvider.getUriForFile(activity, "${activity.packageName}.fileprovider", copy)
+            }
+            val send = if (clip == null) {
+                Intent(Intent.ACTION_SEND).apply {
+                    type = "text/plain"
+                    putExtra(Intent.EXTRA_STREAM, uri)
+                }
+            } else {
+                Intent(Intent.ACTION_SEND_MULTIPLE).apply {
+                    type = "*/*"
+                    putParcelableArrayListExtra(Intent.EXTRA_STREAM, arrayListOf(uri, clip))
+                }
+            }.apply {
                 putExtra(Intent.EXTRA_SUBJECT, name.removeSuffix(".txt"))
-                clipData = ClipData.newRawUri(name, uri)
+                clipData = ClipData.newRawUri(name, uri).apply { clip?.let { addItem(ClipData.Item(it)) } }
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
             activity.startActivity(Intent.createChooser(send, text(R.string.send_log)))

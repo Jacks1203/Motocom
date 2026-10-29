@@ -508,6 +508,7 @@ class BikeLink(
         picture.fresh()
         var shown = false
         var sent = 0
+        var bytes = 0L
         var empty = 0
         var countedFrom = System.currentTimeMillis()
         val length = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN)
@@ -533,12 +534,18 @@ class BikeLink(
             output.write(length.putInt(0, chunk?.size ?: 0).array())
             if (chunk != null) output.write(chunk)
             output.flush()
-            if (chunk != null) sent++ else empty++
+            if (chunk != null) {
+                sent++
+                bytes += chunk.size
+            } else {
+                empty++
+            }
             // A line every so often says whether the bike keeps asking and the picture keeps
             // coming, which is all there is to go on afterwards.
             if (System.currentTimeMillis() - countedFrom >= TALLY_MS) {
-                events.log("imagen: $sent enviadas y $empty peticiones sin nada nuevo en ${TALLY_MS / 1000} s")
+                events.log("imagen: $sent enviadas (${bytes / 1024} KB) y $empty peticiones sin nada nuevo en ${TALLY_MS / 1000} s")
                 sent = 0
+                bytes = 0
                 empty = 0
                 countedFrom = System.currentTimeMillis()
             }

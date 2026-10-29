@@ -260,6 +260,11 @@ class DisplayService() : IBikeDisplay.Stub() {
         findPairing()?.let { return it }
         say("emparejando la moto como dispositivo conectado: " +
             run("cmd", "companiondevice", "associate", user(), SHELL, PAIRING, APP_STREAMING))
+        // Samsung lists it a moment after saying it is made.
+        repeat(PAIRING_TRIES) {
+            findPairing()?.let { return it }
+            Thread.sleep(PAIRING_WAIT_MS)
+        }
         return findPairing() ?: error("no se pudo emparejar; la lista dice: " +
             run("cmd", "companiondevice", "list", user()))
     }
@@ -474,6 +479,8 @@ class DisplayService() : IBikeDisplay.Stub() {
 
         /** A made-up, locally administered address that only names the bike's pairing. */
         const val PAIRING = "02:4d:4f:54:4f:01"
+        const val PAIRING_TRIES = 10
+        const val PAIRING_WAIT_MS = 300L
         const val APP_STREAMING = "android.app.role.COMPANION_DEVICE_APP_STREAMING"
         /** More than earlier versions could have piled up on any phone. */
         const val MAX_PAIRINGS = 50

@@ -15,8 +15,8 @@ android {
         // the phone locked, Android 13.
         minSdk = 29
         targetSdk = 36
-        versionCode = 17
-        versionName = "0.17"
+        versionCode = 18
+        versionName = "0.18"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         // Lets codigo/moto_falsa.py in through `adb forward`; never in a published build.
         val cableTests = findProperty("cableTests") == "true"
