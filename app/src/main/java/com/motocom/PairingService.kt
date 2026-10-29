@@ -58,7 +58,7 @@ class PairingService : Service() {
     }
 
     private fun begin() {
-        createChannel()
+        createChannel(this)
         (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).cancel(DONE_ID)
         try {
             ServiceCompat.startForeground(this, NOTIF_ID, waiting(), ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
@@ -169,8 +169,6 @@ class PairingService : Service() {
         (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).notify(id, notification)
     }
 
-    private fun createChannel() = createChannel(this)
-
     private fun notice(text: String, ask: Boolean, alert: Boolean = false, done: Boolean = false, cancel: Boolean = true): Notification {
         val builder = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle(if (done) "Motocom" else getString(R.string.pair_notice_title))
@@ -180,14 +178,7 @@ class PairingService : Service() {
             .setOnlyAlertOnce(!alert)
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
         // Only at the end: opening the app before would leave Settings and its dialog.
-        if (done) {
-            val open = PendingIntent.getActivity(
-                this, 0,
-                Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-            )
-            return builder.setContentIntent(open).setAutoCancel(true).build()
-        }
+        if (done) return builder.setContentIntent(BikeService.openApp(this)).setAutoCancel(true).build()
         builder.setOngoing(true)
         if (ask) {
             // Mutable, or Android could not fill in what was typed.

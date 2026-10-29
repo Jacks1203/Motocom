@@ -64,7 +64,6 @@ object Pxc {
 
     // Instead of a reply.
     const val NOT_SUPPORTED = 0x80000010.toInt()
-    const val FAILED = 0x80000020.toInt()
 
     @Throws(IOException::class)
     fun read(input: InputStream): PxcMessage {
@@ -179,11 +178,6 @@ data class PictureRequest(
 /** A handlebar button or a touch, as the bike reports it: the body of [Rv.KEY_OR_TOUCH]. */
 data class BikeInput(val type: Int, val x: Int, val y: Int, val slot: Int, val key: Int) {
     companion object {
-        const val UP = 1
-        const val DOWN = 2
-        const val MOVE = 3
-        const val KEY = 4
-
         fun parse(body: ByteArray): BikeInput? {
             if (body.size < 10) return null
             val b = ByteBuffer.wrap(body).order(ByteOrder.LITTLE_ENDIAN)
@@ -196,6 +190,8 @@ data class BikeInput(val type: Int, val x: Int, val y: Int, val slot: Int, val k
 }
 
 private fun readFully(input: InputStream, length: Int): ByteArray {
+    // The bike's "next frame" has no body, thirty times a second.
+    if (length == 0) return NO_BYTES
     val bytes = ByteArray(length)
     var read = 0
     while (read < length) {

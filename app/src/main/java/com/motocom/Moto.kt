@@ -29,9 +29,9 @@ import java.io.File
 import java.io.IOException
 import java.io.RandomAccessFile
 import java.net.InetAddress
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
+import java.time.LocalDateTime
+import java.time.format.DateTimeFormatter
+import java.util.concurrent.Executors
 import kotlin.concurrent.thread
 
 /**
@@ -66,21 +66,20 @@ class Moto private constructor(private val context: Context) {
     val bike = mutableStateOf(prefs.getString(KEY_QR, null)?.let(BikeQr::parse))
 
     private val main = Handler(Looper.getMainLooper())
-    private val stamp = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
-    private val day = SimpleDateFormat("dd-MM-yyyy HH:mm:ss", Locale.US)
     private val file = File(context.getExternalFilesDir(null), "moto_log.txt")
-    /** The first seconds of the last picture sent to the bike, sent along with the record. */
-    private val video = File(context.getExternalFilesDir(null), "moto_video.h264")
+    /** The one thread that touches [file], in order, so no line waits on the disk. */
+    private val disk = Executors.newSingleThreadExecutor { job -> Thread(job, "moto-registro").apply { isDaemon = true } }
 
     /** Connect was pressed before ADB was up: it connects by itself as soon as it is. */
     val waitingForAdb = mutableStateOf(false)
 
     init {
-        thread(isDaemon = true) {
-            // Once per start of the app, before anything is going on that would wait for the file.
+        disk.execute {
+            // The recording of what went to the bike, from 0.18, is no longer made: its space back.
+            File(context.getExternalFilesDir(null), "moto_video.h264").delete()
             trimLog()
             // Only the end, without the system's reports, which are for whoever reads the file.
-            val old = synchronized(file) { runCatching { if (file.exists()) tail() else null }.getOrNull() }
+            val old = runCatching { if (file.exists()) tail(TAIL_BYTES) else null }.getOrNull()
                 ?.lines()?.drop(1)?.filter { it.isNotEmpty() && !it.startsWith(REPORT_INDENT) }?.takeLast(200)
             if (old != null) main.post { lines.addAll(0, old) }
         }
@@ -109,7 +108,7 @@ class Moto private constructor(private val context: Context) {
     fun connect() {
         if (running.value || waitingForAdb.value) return
         whyNot()?.let {
-            log("no se conecta: ${Language.spanish(context, it)}")
+            log("no se conecta: ${Said(it).forLog(context)}")
             toast(text(it))
             return
         }
@@ -174,15 +173,14 @@ class Moto private constructor(private val context: Context) {
 
     /** Where the bike and the phone are on the bike's wifi, once in it; kept to call again. */
     @Volatile private var bikeAddress: InetAddress? = null
-    private var phoneAddress: InetAddress? = null
+    @Volatile private var phoneAddress: InetAddress? = null
 
     /** One for the whole run, so the app stays on the bike's screen between attempts. */
     private var picture: MirrorPicture? = null
 
     /** Since when the system's report has things not yet in the record. */
     private var reportSince = 0L
-    /** Whether this run has had the bike showing, or a report on getting in without an address. */
-    private var shownThisRun = false
+    /** Whether this run already has a report on getting in without an address. */
     private var reportedNoAddress = false
 
     /** What is asked for before [connect]: the wifi-direct one, and notifications, which are optional. */
@@ -253,15 +251,14 @@ class Moto private constructor(private val context: Context) {
         if (running.value) return
         running.value = true
         appPlace.value = AppPlace.NOWHERE
-        ShellLink.bind()
+        ShellLink.refresh()
         var made: MirrorPicture? = null
-        made = MirrorPicture(::log, ::chosenComponent, { dpi.intValue }, { place ->
+        made = MirrorPicture(::log, ::chosenComponent, { dpi.intValue }) { place ->
             // A picture let go of says so late; only the current one speaks for the run.
             main.post { if (running.value && picture === made) appPlace.value = place }
-        }, video)
+        }
         picture = made
         reportSince = System.currentTimeMillis() - REPORT_BEFORE_MS
-        shownThisRun = false
         reportedNoAddress = false
         wifiWorked = false
         wifiRefused = false
@@ -328,7 +325,7 @@ class Moto private constructor(private val context: Context) {
             onJoined = { bike, phone -> joined(bike, phone) },
             onLeft = { bikeLeft() },
             onNoAddress = {
-                // Once a run: later ones would repeat it, and the one at the stop covers them.
+                // Once a run: later ones would repeat it.
                 if (!reportedNoAddress) {
                     reportedNoAddress = true
                     systemReport("el móvil entró en el wifi de la moto pero no recibió dirección")
@@ -353,7 +350,7 @@ class Moto private constructor(private val context: Context) {
             log("se vuelve a pedir el wifi normal de la moto, que ya funcionó")
             network?.stop()
             network = null
-            main.postDelayed({ if (running.value && link != null && !onTheWay()) startRoute() }, RETRY_MS)
+            retryRouteLater()
             return
         }
         if (prefs.getString(KEY_APPROVED, null) != bike.value?.ssid) wifiRefused = true
@@ -364,16 +361,16 @@ class Moto private constructor(private val context: Context) {
     private fun switchRoute(next: Route, why: String) {
         if (!running.value || bikeAddress != null) return
         log("se prueba a entrar ${next.how} ($why)")
-        // Joining an ordinary wifi takes many phones off the home one, and ADB started over
-        // wireless debugging goes with it, unless USB debugging is on.
-        if (next == Route.WIFI && !ShellLink.usbDebuggingOn()) {
-            log("aviso: con la depuración USB apagada, ADB puede pararse al cambiar de wifi")
-        }
         wifi?.stop()
         wifi = null
         network?.stop()
         network = null
         route = next
+        retryRouteLater()
+    }
+
+    /** The way in again, after a moment for the last try to let go. */
+    private fun retryRouteLater() {
         main.postDelayed({ if (running.value && link != null && !onTheWay()) startRoute() }, RETRY_MS)
     }
 
@@ -434,7 +431,6 @@ class Moto private constructor(private val context: Context) {
             main.post {
                 if (retired || !running.value) return@post
                 if (state == BikeState.SHOWING && this@Moto.state.value != BikeState.SHOWING) {
-                    shownThisRun = true
                     rememberRoute()
                     main.removeCallbacks(giveUp)
                     toast(text(R.string.connected))
@@ -520,8 +516,6 @@ class Moto private constructor(private val context: Context) {
         if (!running.value) return
         main.removeCallbacks(giveUp)
         running.value = false
-        // A run that never got to the bike's screen: whatever the system saw goes in the record.
-        if (!shownThisRun) systemReport("parado sin llegar a ver la app en la moto")
         closeAttempt()
         val done = picture
         picture = null
@@ -544,40 +538,34 @@ class Moto private constructor(private val context: Context) {
 
     /** Sends the whole record, every attempt in it, through WhatsApp, mail, Drive... */
     fun share(activity: Context) {
-        try {
-            if (!file.exists() || file.length() == 0L) {
-                toast(text(R.string.no_log))
-                return
+        // Copied on the record's own thread, after every line already said; sent from the main one.
+        disk.execute {
+            val sent = runCatching {
+                if (!file.exists() || file.length() == 0L) return@runCatching null
+                val exports = File(activity.cacheDir, "exports").apply { mkdirs() }
+                exports.listFiles()?.forEach { it.delete() }
+                val name = "registro-moto-${DateTimeFormatter.ofPattern("yyyyMMdd-HHmm").format(LocalDateTime.now())}.txt"
+                val out = file.copyTo(File(exports, name), overwrite = true)
+                name to FileProvider.getUriForFile(activity, "${activity.packageName}.fileprovider", out)
             }
-            val exports = File(activity.cacheDir, "exports").apply { mkdirs() }
-            exports.listFiles()?.forEach { it.delete() }
-            val name = "registro-moto-${SimpleDateFormat("yyyyMMdd-HHmm", Locale.US).format(Date())}.txt"
-            val out = File(exports, name).apply { writeBytes(synchronized(file) { file.readBytes() }) }
-            val uri = FileProvider.getUriForFile(activity, "${activity.packageName}.fileprovider", out)
-            // What went to the bike, if anything did: played on a computer it shows the picture.
-            val clip = video.takeIf { it.length() > 0 }?.let {
-                val copy = File(exports, name.replace("registro-moto", "video-moto").replace(".txt", ".h264"))
-                it.copyTo(copy, overwrite = true)
-                FileProvider.getUriForFile(activity, "${activity.packageName}.fileprovider", copy)
-            }
-            val send = if (clip == null) {
-                Intent(Intent.ACTION_SEND).apply {
-                    type = "text/plain"
-                    putExtra(Intent.EXTRA_STREAM, uri)
+            main.post {
+                try {
+                    val (name, uri) = sent.getOrThrow() ?: run {
+                        toast(text(R.string.no_log))
+                        return@post
+                    }
+                    val send = Intent(Intent.ACTION_SEND).apply {
+                        type = "text/plain"
+                        putExtra(Intent.EXTRA_STREAM, uri)
+                        putExtra(Intent.EXTRA_SUBJECT, name.removeSuffix(".txt"))
+                        clipData = ClipData.newRawUri(name, uri)
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    }
+                    activity.startActivity(Intent.createChooser(send, text(R.string.send_log)))
+                } catch (e: Exception) {
+                    toast(text(R.string.send_log_failed, e.message ?: e.javaClass.simpleName))
                 }
-            } else {
-                Intent(Intent.ACTION_SEND_MULTIPLE).apply {
-                    type = "*/*"
-                    putParcelableArrayListExtra(Intent.EXTRA_STREAM, arrayListOf(uri, clip))
-                }
-            }.apply {
-                putExtra(Intent.EXTRA_SUBJECT, name.removeSuffix(".txt"))
-                clipData = ClipData.newRawUri(name, uri).apply { clip?.let { addItem(ClipData.Item(it)) } }
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
-            activity.startActivity(Intent.createChooser(send, text(R.string.send_log)))
-        } catch (e: Exception) {
-            toast(text(R.string.send_log_failed, e.message ?: e.javaClass.simpleName))
         }
     }
 
@@ -585,28 +573,12 @@ class Moto private constructor(private val context: Context) {
     private fun header() {
         val wifi = context.getSystemService(Context.WIFI_SERVICE) as WifiManager?
         val location = context.getSystemService(Context.LOCATION_SERVICE) as LocationManager?
-        log("======== intento del ${synchronized(day) { day.format(Date()) }} ========")
+        log("======== intento del ${DAY.format(LocalDateTime.now())} ========")
         log("Motocom ${BuildConfig.VERSION_NAME} en ${Build.BRAND} ${Build.MODEL}, Android ${Build.VERSION.RELEASE} (${Build.VERSION.SDK_INT})")
         log("wifi ${if (wifi?.isWifiEnabled == true) "encendido" else "APAGADO"}, " +
             "ubicación ${if (location != null && LocationManagerCompat.isLocationEnabled(location)) "encendida" else "APAGADA"}, " +
-            "ADB ${if (ShellLink.ready) "READY" else "NOT_RUNNING"} (uid ${ShellLink.uid()}), " +
+            "ADB ${if (ShellLink.ready) "READY" else "NOT_RUNNING"}, " +
             "depuración USB ${if (ShellLink.usbDebuggingOn()) "encendida" else "APAGADA"}, app ${chosenApp.value ?: "ninguna"} a ${dpi.intValue} ppp")
-        // Some phones cannot be in a home wifi and in the bike's at once on different bands.
-        @Suppress("DEPRECATION")
-        val home = runCatching { wifi?.connectionInfo }.getOrNull()
-        log(
-            if (home == null || home.frequency <= 0) "wifi normal: sin conectar a ninguna red"
-            else "wifi normal: conectado a ${home.frequency} MHz (${when {
-                home.frequency >= 5925 -> "6 GHz"
-                home.frequency >= 4900 -> "5 GHz"
-                else -> "2,4 GHz"
-            }}), señal ${home.rssi} dBm, ${home.linkSpeed} Mbps" +
-                (if (Build.VERSION.SDK_INT >= 30) ", estándar wifi ${home.wifiStandard}" else "")
-        )
-        // Whether this phone can be in two wifis at once, which is what the bike's needs with a home one.
-        log("wifi del móvil: 5 GHz ${if (wifi?.is5GHzBandSupported == true) "sí" else "no"}, " +
-            "wifi directo ${if (wifi?.isP2pSupported == true) "sí" else "no"}, " +
-            "dos wifi normales a la vez ${if (Build.VERSION.SDK_INT >= 31 && wifi?.isStaConcurrencyForLocalOnlyConnectionsSupported == true) "sí" else "no"}")
     }
 
     /**
@@ -630,8 +602,8 @@ class Moto private constructor(private val context: Context) {
             val body = text.let { if (secret != null) it.replace(secret, "***") else it }
                 .replace(Regex("(?i)(passphrase|psk|password|pwd)(\"?\\s*[=:]\\s*)(\"[^\"]*\"|(?!<)\\S+)"), "$1$2***")
                 .lines()
-            synchronized(file) {
-                val now = stamp.format(Date())
+            disk.execute {
+                val now = STAMP.format(LocalDateTime.now())
                 runCatching {
                     file.appendText(buildString {
                         append("$now  ======== informe del sistema: $why ========\n")
@@ -644,19 +616,19 @@ class Moto private constructor(private val context: Context) {
         }
     }
 
-    /** The end of the record, about as much as the screen shows; the first line may come cut. */
-    private fun tail(): String = RandomAccessFile(file, "r").use { raf ->
-        val from = maxOf(0L, raf.length() - TAIL_BYTES)
+    /** The last [bytes] of the record; the first line may come cut. Only on [disk]. */
+    private fun tail(bytes: Long): String = RandomAccessFile(file, "r").use { raf ->
+        val from = maxOf(0L, raf.length() - bytes)
         raf.seek(from)
         val bytes = ByteArray((raf.length() - from).toInt())
         raf.readFully(bytes)
         String(bytes, Charsets.UTF_8)
     }
 
-    /** Keeps the record from growing for ever; never on the main thread, the file being megabytes. */
+    /** Keeps the record from growing for ever, reading only the half it keeps. Only on [disk]. */
     private fun trimLog() {
-        synchronized(file) {
-            runCatching { if (file.length() > MAX_BYTES) file.writeText(file.readText().takeLast(MAX_BYTES / 2)) }
+        runCatching {
+            if (file.length() > MAX_BYTES) file.writeText(tail(MAX_BYTES / 2L).substringAfter('\n'))
         }
     }
 
@@ -680,10 +652,8 @@ class Moto private constructor(private val context: Context) {
     private fun toast(text: String) = main.post { Toast.makeText(context, text, Toast.LENGTH_LONG).show() }
 
     private fun log(line: String) {
-        // Lines come from many threads, and SimpleDateFormat is not to be shared between them.
-        val stamped = synchronized(file) {
-            "${stamp.format(Date())}  $line".also { runCatching { file.appendText(it + "\n") } }
-        }
+        val stamped = "${STAMP.format(LocalDateTime.now())}  $line"
+        disk.execute { runCatching { file.appendText(stamped + "\n") } }
         main.post {
             lines += stamped
             if (lines.size > 400) lines.removeRange(0, 100)
@@ -713,6 +683,8 @@ class Moto private constructor(private val context: Context) {
         private const val KEY_APPROVED = "wifi_aceptada"
         /** About the last 200 lines of the record. */
         private const val TAIL_BYTES = 200_000L
+        private val STAMP = DateTimeFormatter.ofPattern("HH:mm:ss.SSS")
+        private val DAY = DateTimeFormatter.ofPattern("dd-MM-yyyy HH:mm:ss")
         /** 592 pixels across at this density is about a phone's width of map. */
         const val DEFAULT_DPI = 240
 

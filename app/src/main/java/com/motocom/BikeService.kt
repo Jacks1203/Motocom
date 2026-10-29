@@ -8,7 +8,6 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
-import android.os.Build
 import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
@@ -44,14 +43,9 @@ class BikeService : Service() {
     }
 
     private fun begin() {
-        createChannel()
+        createChannel(this)
         try {
-            val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
-            } else {
-                0
-            }
-            ServiceCompat.startForeground(this, NOTIF_ID, notification(), type)
+            ServiceCompat.startForeground(this, NOTIF_ID, notification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
             foreground = true
         } catch (e: Exception) {
             // Without it the bike still works while this app is open and in front.
@@ -75,8 +69,7 @@ class BikeService : Service() {
     }
 
     private fun end() {
-        wakeLock?.let { if (it.isHeld) it.release() }
-        wakeLock = null
+        releaseLock()
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
         foreground = false
         // A start still on its way must reach startForeground first; it ends it then.
@@ -91,19 +84,16 @@ class BikeService : Service() {
 
     override fun onDestroy() {
         foreground = false
-        wakeLock?.let { if (it.isHeld) it.release() }
-        wakeLock = null
+        releaseLock()
         super.onDestroy()
     }
 
-    private fun createChannel() = createChannel(this)
+    private fun releaseLock() {
+        wakeLock?.let { if (it.isHeld) it.release() }
+        wakeLock = null
+    }
 
     private fun notification(): Notification {
-        val open = PendingIntent.getActivity(
-            this, 0,
-            Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
         val disconnect = PendingIntent.getService(
             this, 1,
             Intent(this, BikeService::class.java).setAction(ACTION_DISCONNECT),
@@ -114,7 +104,7 @@ class BikeService : Service() {
             .setContentText(getString(R.string.bike_notice_text))
             .setSmallIcon(R.drawable.ic_moto)
             .setOngoing(true)
-            .setContentIntent(open)
+            .setContentIntent(openApp(this))
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
             .addAction(0, getString(R.string.disconnect), disconnect)
             .build()
@@ -138,6 +128,13 @@ class BikeService : Service() {
         private var foreground = false
         /** Starts asked for that have not reached onStartCommand yet. */
         private var pending = 0
+
+        /** Opens the app from a notice, without starting another one on top. */
+        fun openApp(context: Context): PendingIntent = PendingIntent.getActivity(
+            context, 0,
+            Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
 
         /** Made again on every start of the app too: only the name and description change then, to its language. */
         fun createChannel(context: Context) {

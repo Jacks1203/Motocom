@@ -5,14 +5,11 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
-import android.net.NetworkInfo
 import android.net.wifi.WpsInfo
 import android.net.wifi.p2p.WifiP2pConfig
 import android.net.wifi.p2p.WifiP2pDevice
-import android.net.wifi.p2p.WifiP2pGroup
 import android.net.wifi.p2p.WifiP2pInfo
 import android.net.wifi.p2p.WifiP2pManager
-import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -38,9 +35,9 @@ class BikeWifi(
     private val bike: BikeQr?,
     private val onJoined: (bike: InetAddress, phone: InetAddress?) -> Unit,
     /** The bike's wifi is gone: switched off, most likely. */
-    private val onLeft: () -> Unit = {},
+    private val onLeft: () -> Unit,
     /** The phone got into the bike's wifi but left it with no address: the system's report is wanted. */
-    private val onNoAddress: () -> Unit = {}
+    private val onNoAddress: () -> Unit
 ) {
     private val manager = context.getSystemService(Context.WIFI_P2P_SERVICE) as WifiP2pManager?
     private var channel: WifiP2pManager.Channel? = null
@@ -61,10 +58,6 @@ class BikeWifi(
     private var askedOnce = false
     private var lastSeen = ""
     private var otherGroup = ""
-    /** The last of each thing the system has said about wifi direct, to write only changes. */
-    private var lastLink = ""
-    private var lastSelf = ""
-    private var lastBike = -1
     /** How the phone itself stands in wifi direct, as the system last said. */
     private var selfStatus = -1
     /** The password's turn came while the phone was in, waiting for an address: it goes next. */
@@ -99,7 +92,6 @@ class BikeWifi(
         passwordPending = false
         // Android throws rather than refuse when the name or the password are not to its liking.
         val wrong = when {
-            Build.VERSION.SDK_INT < 29 -> "este móvil no lo permite"
             !known.ssid.matches(Regex("DIRECT-[a-zA-Z0-9]{2}.*")) -> "el nombre ${known.ssid} no empieza por DIRECT- y dos letras"
             known.ssid.toByteArray(Charsets.UTF_8).size > 32 -> "el nombre ${known.ssid} es demasiado largo"
             known.password.length !in 8..63 -> "la contraseña del QR no tiene entre 8 y 63 caracteres"
@@ -148,28 +140,23 @@ class BikeWifi(
                 asked = false
                 runCatching { manager?.discoverPeers(on, result("buscar aparatos por wifi directo", quiet = true)) }
             }
-            main.postDelayed(this, LOOK_AGAIN_MS)
+            // In, it has nothing to do: losing the bike's group ends this start (onLeft).
+            if (!joined) main.postDelayed(this, LOOK_AGAIN_MS)
         }
     }
 
     private val receiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             when (intent.action) {
-                WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION -> {
-                    watchBike()
-                    lookAtPeers()
-                }
-                WifiP2pManager.WIFI_P2P_CONNECTION_CHANGED_ACTION -> {
-                    sayLink(intent)
-                    lookAtGroup()
-                }
+                WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION -> lookAtPeers()
+                WifiP2pManager.WIFI_P2P_CONNECTION_CHANGED_ACTION -> lookAtGroup()
                 WifiP2pManager.WIFI_P2P_STATE_CHANGED_ACTION -> {
                     val state = intent.getIntExtra(WifiP2pManager.EXTRA_WIFI_STATE, -1)
                     if (state == WifiP2pManager.WIFI_P2P_STATE_DISABLED) log("wifi directo: el sistema dice que está apagado")
                 }
                 WifiP2pManager.WIFI_P2P_THIS_DEVICE_CHANGED_ACTION -> {
                     @Suppress("DEPRECATION")
-                    saySelf(intent.getParcelableExtra<WifiP2pDevice>(WifiP2pManager.EXTRA_WIFI_P2P_DEVICE))
+                    selfChanged(intent.getParcelableExtra<WifiP2pDevice>(WifiP2pManager.EXTRA_WIFI_P2P_DEVICE))
                 }
             }
         }
@@ -192,9 +179,6 @@ class BikeWifi(
         groupWaits = 0
         lastSeen = ""
         otherGroup = ""
-        lastLink = ""
-        lastSelf = ""
-        lastBike = -1
         selfStatus = -1
         passwordPending = false
         waitingSince = 0L
@@ -214,7 +198,7 @@ class BikeWifi(
         )
         listening = true
         // Android no longer repeats the phone's own state on registering: ask for it.
-        runCatching { wifi.requestDeviceInfo(on) { self -> if (listening && on === channel) saySelf(self) } }
+        runCatching { wifi.requestDeviceInfo(on) { self -> if (listening && on === channel) selfChanged(self) } }
         // The phone may still be in the bike's group from the last time.
         lookAtGroup()
         wifi.discoverPeers(on, result("buscar aparatos por wifi directo"))
@@ -300,57 +284,8 @@ class BikeWifi(
         }
     }
 
-    /**
-     * Every change of how the bike stands with the phone, also while the phone is waiting for an
-     * answer and [lookAtPeers] does not look: where a link gets stuck is in these.
-     */
-    private fun watchBike() {
-        if (!listening || joined) return
-        val wifi = manager ?: return
-        val on = channel ?: return
-        wifi.requestPeers(on) { peers ->
-            if (!listening || on !== channel || joined) return@requestPeers
-            val found = peers?.deviceList.orEmpty().firstOrNull {
-                val name = it.deviceName.orEmpty()
-                if (bike != null) name == bike.name else name.startsWith(DEFAULT_PREFIX)
-            }
-            val now = found?.status ?: NOT_SEEN
-            if (now != lastBike && lastBike != -1) {
-                log("la moto pasa a: ${if (found == null) "no se ve" else describe(found)}")
-            }
-            lastBike = now
-        }
-    }
-
-    /** What the system says each time the phone's wifi direct link changes, as it says it. */
-    @Suppress("DEPRECATION")
-    private fun sayLink(intent: Intent) {
-        if (!listening) return
-        val network = intent.getParcelableExtra<NetworkInfo>(WifiP2pManager.EXTRA_NETWORK_INFO)
-        val info = intent.getParcelableExtra<WifiP2pInfo>(WifiP2pManager.EXTRA_WIFI_P2P_INFO)
-        val group = intent.getParcelableExtra<WifiP2pGroup>(WifiP2pManager.EXTRA_WIFI_P2P_GROUP)
-        val said = buildString {
-            append("enlace wifi directo: ")
-            append(network?.detailedState?.name?.lowercase() ?: "?")
-            append(if (info == null) ", grupo ?" else if (info.groupFormed) ", grupo formado" else ", sin grupo")
-            if (info?.groupFormed == true) {
-                append(if (info.isGroupOwner) ", el móvil es el jefe" else ", jefe ${info.groupOwnerAddress?.hostAddress ?: "sin dirección"}")
-            }
-            if (group != null) {
-                append(", red ${group.networkName ?: "?"}")
-                if (group.frequency > 0) append(" a ${group.frequency} MHz")
-                group.owner?.deviceName?.takeIf { it.isNotEmpty() }?.let { append(" de $it") }
-            }
-            network?.reason?.takeIf { it.isNotEmpty() }?.let { append(" ($it)") }
-        }
-        if (said != lastLink) log(said)
-        lastLink = said
-    }
-
-    private fun saySelf(self: WifiP2pDevice?) {
-        val said = "estado del móvil en wifi directo: ${self?.let { status(it.status) } ?: "?"}"
-        if (said != lastSelf) log(said)
-        lastSelf = said
+    /** How the phone itself stands in wifi direct: getting in is where the wait for an address starts. */
+    private fun selfChanged(self: WifiP2pDevice?) {
         val now = self?.status ?: return
         val was = selfStatus
         selfStatus = now
@@ -358,8 +293,7 @@ class BikeWifi(
         if (now == WifiP2pDevice.CONNECTED && was != WifiP2pDevice.CONNECTED && (askedOnce || triedPassword)) {
             // In the bike's wifi: what is missing now is the address it hands out.
             waitingSince = SystemClock.elapsedRealtime()
-            sayGroup()
-            main.postDelayed(sayAddresses, ADDRESS_LOOK_MS)
+            checkGroup()
             main.postDelayed(noAddress, ADDRESS_WAIT_MS)
         } else if (now != WifiP2pDevice.CONNECTED && waitingSince > 0) {
             stopWaiting()
@@ -377,7 +311,6 @@ class BikeWifi(
 
     private fun stopWaiting() {
         waitingSince = 0L
-        main.removeCallbacks(sayAddresses)
         main.removeCallbacks(noAddress)
     }
 
@@ -387,35 +320,22 @@ class BikeWifi(
         if (listening && passwordPending) main.postDelayed(usePassword, PASSWORD_AFTER_UNDO_MS)
     }
 
-    /** The group the phone is in while it waits: the bike's band and channel, its interface. */
-    private fun sayGroup() {
+    /** The group the phone is in while it waits: if it is not the bike's, there is no address to wait for. */
+    private fun checkGroup() {
         val wifi = manager ?: return
         val on = channel ?: return
         runCatching {
             wifi.requestGroupInfo(on) { group ->
                 if (!listening || on !== channel) return@requestGroupInfo
-                if (group == null) return@requestGroupInfo log("grupo de wifi directo según el sistema: ninguno todavía")
+                if (group == null) return@requestGroupInfo
                 val name = group.networkName.orEmpty()
                 if (group.isGroupOwner || (name.isNotEmpty() && !isBikes(name, group.owner?.deviceName))) {
                     // Somebody else's group, or one of the phone's own: not a wait for the bike's address.
+                    log("el móvil está en otro grupo de wifi directo ($name): no se espera dirección")
                     if (waitingSince > 0) stopWaiting()
                 }
-                log("grupo de wifi directo según el sistema: red ${group.networkName ?: "?"}, " +
-                    "${if (group.frequency > 0) "${group.frequency} MHz" else "frecuencia ?"}, interfaz ${group.`interface` ?: "?"}, " +
-                    "jefe ${group.owner?.deviceName ?: "?"} ${group.owner?.deviceAddress ?: ""}, el móvil ${if (group.isGroupOwner) "es el jefe" else "es cliente"}")
             }
         }.onFailure { log("grupo de wifi directo: no se pudo preguntar (${it.message ?: it})") }
-    }
-
-    /** Whether the wifi direct interface has got an address even though Android has not said so. */
-    private val sayAddresses = Runnable {
-        if (!listening || joined) return@Runnable
-        val found = runCatching {
-            NetworkInterface.getNetworkInterfaces().asSequence().filter { it.name.startsWith("p2p") }
-                .map { nic -> "${nic.name}: ${nic.inetAddresses.asSequence().joinToString { it.hostAddress.orEmpty().substringBefore('%') }.ifEmpty { "sin direcciones" }}" }
-                .joinToString("; ")
-        }.getOrElse { "no se pudo mirar (${it.message ?: it})" }
-        log("tras ${ADDRESS_LOOK_MS / 1000} s en el wifi de la moto, interfaces de wifi directo: ${found.ifEmpty { "ninguna" }}")
     }
 
     /** Android waits about 36 s for the address; if it neither gets it nor gives up, undo it here. */
@@ -578,14 +498,10 @@ class BikeWifi(
         const val GROUP_WAIT_MS = 1_000L
         const val OWNER_RETRIES = 5
         const val GROUP_WAITS = 5
-        /** When to look at the interface's addresses; the bike gave one in well under a second. */
-        const val ADDRESS_LOOK_MS = 10_000L
         /** Longer than Android's own 36 s, which should be the one to give up. */
         const val ADDRESS_WAIT_MS = 50_000L
         /** After undoing the link: the undo and the looking again that follows it, done first. */
         const val PASSWORD_AFTER_UNDO_MS = 5_000L
-        /** [lastBike] when the bike is not among what the phone sees. */
-        const val NOT_SEEN = -2
     }
 
     private fun status(status: Int) = when (status) {

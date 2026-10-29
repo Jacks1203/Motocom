@@ -4,7 +4,6 @@
 
 # Started by name with app_process over ADB (ShellLink), so nothing in the app calls it.
 -keep class com.motocom.shell.ShellMain { public static void main(java.lang.String[]); }
--keep class com.motocom.shell.WifiReport { public static void main(java.lang.String[]); }
 
 # The Binder between the app and the shell process.
 -keep class com.motocom.shell.IBikeDisplay { *; }

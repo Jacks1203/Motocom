@@ -12,6 +12,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.PowerManager
 import android.provider.Settings
+import android.util.LruCache
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
@@ -256,7 +257,7 @@ class MainActivity : ComponentActivity() {
         val adbMessage = ShellLink.message.value?.read(this).orEmpty()
         val adbMissing = !adbReady && !paired
         val sizeName = SIZES.firstOrNull { it.first == dpi }?.let { stringResource(it.second) } ?: stringResource(R.string.size_dpi, dpi)
-        val appName = chosen?.let(::label)
+        val appName = remember(chosen) { chosen?.let(::label) }
         var picking by rememberSaveable { mutableStateOf(false) }
         var showBike by rememberSaveable { mutableStateOf(false) }
 
@@ -543,13 +544,20 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    /** Loaded off the main thread: some launchers' icons are slow to draw. */
+    /**
+     * Loaded off the main thread, since some launchers' icons are slow to draw, and kept: the
+     * list of apps would draw each one again every time it scrolls into view.
+     */
     @Composable
-    private fun appIcon(pkg: String): ImageBitmap? = produceState<ImageBitmap?>(null, pkg) {
+    private fun appIcon(pkg: String): ImageBitmap? = produceState(icons.get(pkg), pkg) {
+        if (value != null) return@produceState
         value = withContext(Dispatchers.IO) {
             runCatching { packageManager.getApplicationIcon(pkg).toBitmap(96, 96).asImageBitmap() }.getOrNull()
+                ?.also { icons.put(pkg, it) }
         }
     }.value
+
+    private val icons = LruCache<String, ImageBitmap>(64)
 
     @Composable
     private fun BikeDialog(bike: BikeQr, running: Boolean, onDismiss: () -> Unit) {
