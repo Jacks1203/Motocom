@@ -9,8 +9,6 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.view.Surface
 import com.motocom.bike.BikePicture
-import java.io.File
-import java.io.OutputStream
 import com.motocom.bike.PictureRequest
 import com.motocom.shell.ShellLink
 import java.util.concurrent.ExecutorService
@@ -42,9 +40,7 @@ class MirrorPicture(
     private val app: () -> Pair<String, String>?,
     private val dpi: () -> Int,
     /** Each time the app moves, or failed to; from any thread. */
-    private val onApp: (AppPlace) -> Unit = {},
-    /** Where the first seconds of what the bike gets are kept, to play them on a computer. */
-    private val recording: File? = null
+    private val onApp: (AppPlace) -> Unit = {}
 ) : BikePicture {
 
     private val chunks = LinkedBlockingQueue<ByteArray>()
@@ -71,8 +67,7 @@ class MirrorPicture(
     private val moverLock = Any()
 
     /** The bike's screen, or -1. */
-    @Volatile var displayId = -1
-        private set
+    @Volatile private var displayId = -1
 
     /** SPS and PPS: what a decoder needs before the first frame. */
     @Volatile private var header: ByteArray? = null
@@ -88,12 +83,6 @@ class MirrorPicture(
 
     /** The first whole frames of each encoder, told in the record; only on the encoder's thread. */
     private var keyframesTold = 0
-
-    /** Open while [recording] is being filled: once per connection, from the first frame. */
-    private val recordLock = Any()
-    private var recorder: OutputStream? = null
-    private var recorded = 0L
-    private var recordingDone = recording == null
 
     @Synchronized
     override fun start(request: PictureRequest): Boolean {
@@ -262,42 +251,14 @@ class MirrorPicture(
             chunks.clear()
             waitingForWholeFrame = true
         }
-        runCatching {
-            codec?.setParameters(Bundle().apply { putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0) })
-        }
+        askWholeFrame(codec)
     }
 
-    override fun next(waitMs: Long): ByteArray? =
-        chunks.poll(waitMs, TimeUnit.MILLISECONDS)?.also { record(it) }
-
-    /**
-     * Keeps what goes to the bike, as it goes, until [RECORDING_BYTES]: a player on a computer
-     * then shows whether the picture itself is right. Called only from the one reader.
-     */
-    private fun record(chunk: ByteArray): Unit = synchronized(recordLock) {
-        if (recordingDone) return
-        try {
-            val out = recorder ?: recording!!.outputStream().buffered(256 * 1024).also {
-                recorder = it
-                log("grabando lo que se envía a la moto, para el registro")
-            }
-            out.write(chunk)
-            recorded += chunk.size
-            if (recorded >= RECORDING_BYTES) endRecording()
-        } catch (e: Exception) {
-            log("no se pudo grabar lo que se envía a la moto: $e")
-            endRecording()
-        }
+    private fun askWholeFrame(codec: MediaCodec?) {
+        runCatching { codec?.setParameters(Bundle().apply { putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0) }) }
     }
 
-    private fun endRecording(): Unit = synchronized(recordLock) {
-        // Also before anything came: a late frame must not open a file nobody closes.
-        recordingDone = true
-        val out = recorder ?: return
-        recorder = null
-        runCatching { out.close() }
-        log("grabados ${recorded / 1024} KB de lo enviado a la moto (salen al enviar el registro)")
-    }
+    override fun next(waitMs: Long): ByteArray? = chunks.poll(waitMs, TimeUnit.MILLISECONDS)
 
     /** The bike stopped asking: the encoder goes, the screen and the app on it stay. */
     @Synchronized
@@ -308,7 +269,6 @@ class MirrorPicture(
     fun release() {
         released = true
         stopEncoder()
-        endRecording()
         lastRequest = null
         val runner = synchronized(moverLock) { mover.also { mover = null } }
         // Moves still waiting no longer matter: the app is coming back to the phone.
@@ -396,9 +356,7 @@ class MirrorPicture(
                 if (chunks.size > BACKLOG) {
                     chunks.clear()
                     waitingForWholeFrame = true
-                    runCatching {
-                        codec.setParameters(Bundle().apply { putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0) })
-                    }
+                    askWholeFrame(codec)
                 }
                 if (waitingForWholeFrame) {
                     if (!whole) return
@@ -441,13 +399,18 @@ class MirrorPicture(
         return frame.copyOfRange(0, next) + header + frame.copyOfRange(next, frame.size)
     }
 
-    /** The kinds of the NAL units in [bytes], by their Annex-B start codes. */
+    /**
+     * The kinds of the NAL units in [bytes], by their Annex-B start codes, up to the first piece
+     * of picture: whatever has to come before it is there, and a whole frame is long to walk.
+     */
     private fun nalTypes(bytes: ByteArray): List<Int> {
         val types = ArrayList<Int>()
         var i = 0
         while (i + 3 < bytes.size && types.size < 12) {
             if (bytes[i].toInt() == 0 && bytes[i + 1].toInt() == 0 && bytes[i + 2].toInt() == 1) {
-                types += bytes[i + 3].toInt() and 0x1F
+                val type = bytes[i + 3].toInt() and 0x1F
+                types += type
+                if (type in 1..5) break
                 i += 3
             }
             i++
@@ -487,7 +450,5 @@ class MirrorPicture(
         const val AUD = 9
         /** The first whole frames of each encoder that get a line in the record. */
         const val KEYFRAMES_TOLD = 3
-        /** About half a minute of what goes to the bike. */
-        const val RECORDING_BYTES = 12L * 1024 * 1024
     }
 }

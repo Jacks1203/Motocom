@@ -3,8 +3,6 @@ package com.motocom.shell
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import java.util.concurrent.TimeUnit
-import kotlin.concurrent.thread
 
 /**
  * Everything the system says about getting into the bike's wifi, gathered as "adb shell" can and
@@ -15,20 +13,11 @@ import kotlin.concurrent.thread
  * fits in what Binder carries back to the app.
  */
 internal object WifiReport {
-    /** To see the report with a cable: `adb shell CLASSPATH=<apk> app_process / com.motocom.shell.WifiReport [minutes]`. */
-    @JvmStatic
-    fun main(args: Array<String>) {
-        val minutes = args.firstOrNull()?.toLongOrNull() ?: 10
-        print(make(System.currentTimeMillis() - minutes * 60_000))
-    }
-
     fun make(since: Long): String = buildString {
         part("direcciones del móvil (ip addr)", run("ip", "addr"), 8_000)
-        part("rutas de wifi directo", run("ip", "route", "show", "table", "all").lineSequence().filter { "p2p" in it }.joinToString("\n"), 2_000)
-        val names = packages()
-        part("wifi directo según Android (dumpsys wifip2p)", wifiP2p(run("dumpsys", "wifip2p"), since, names), 40_000)
-        part("cómo se pidió la dirección en wifi directo (dumpsys network_stack)", ipClients(run("dumpsys", "network_stack"), since), 25_000)
-        part("registro del sistema sobre wifi", systemLog(since), 45_000)
+        part("wifi directo según Android (dumpsys wifip2p)", wifiP2p(run("dumpsys", "wifip2p"), since), 20_000)
+        part("cómo se pidió la dirección en wifi directo (dumpsys network_stack)", ipClients(run("dumpsys", "network_stack"), since), 15_000)
+        part("registro del sistema sobre wifi", systemLog(since), 20_000)
     }
 
     private fun StringBuilder.part(title: String, text: String, max: Int) {
@@ -39,14 +28,10 @@ internal object WifiReport {
         append('\n')
     }
 
-    /**
-     * Android's state, its last steps (records) since [since], and every connection it remembers,
-     * any app's: Carbit's among them, to compare, with the package next to each uid.
-     */
-    private fun wifiP2p(dump: String, since: Long, names: Map<String, String>): String {
+    /** Android's state and its last steps (records) since [since]. */
+    private fun wifiP2p(dump: String, since: Long): String {
         val from = SimpleDateFormat("MM-dd HH:mm:ss.SSS", Locale.US).format(Date(since))
         val records = mutableListOf<String>()
-        val connections = mutableListOf<String>()
         val rest = mutableListOf<String>()
         for (line in dump.lineSequence()) {
             val trimmed = line.trim()
@@ -56,29 +41,17 @@ internal object WifiReport {
                     val time = trimmed.substringAfter("time=", "").take(from.length)
                     if (time >= from) records += trimmed
                 }
-                trimmed.startsWith("startTime=") -> connections += named(trimmed, names)
+                // Every connection it remembers, any app's: not what went wrong now.
+                trimmed.startsWith("startTime=") -> {}
                 else -> rest += line
             }
         }
         return buildString {
-            append(rest.joinToString("\n") { named(it, names) }.trim()).append('\n')
-            append("conexiones recordadas (las últimas):\n")
-            connections.takeLast(30).forEach { append(it).append('\n') }
+            append(rest.joinToString("\n").trim()).append('\n')
             append("pasos desde $from:\n")
             records.takeLast(400).forEach { append(it).append('\n') }
         }
     }
-
-    /** "uid=10409" as "uid=10409 (com.offnavigator)". */
-    private fun named(line: String, names: Map<String, String>) =
-        Regex("uid=(\\d+)").replace(line) { match -> names[match.groupValues[1]]?.let { "${match.value} ($it)" } ?: match.value }
-
-    private fun packages(): Map<String, String> =
-        run("cmd", "package", "list", "packages", "-U").lineSequence().mapNotNull { line ->
-            val name = line.substringAfter("package:", "").substringBefore(' ')
-            val uid = line.substringAfter("uid:", "").trim().substringBefore(',')
-            if (name.isEmpty() || uid.isEmpty()) null else uid to name
-        }.toMap()
 
     /**
      * What the address machinery did on each wifi direct interface since [since]: its steps and
@@ -120,22 +93,8 @@ internal object WifiReport {
             .joinToString("\n")
     }
 
-    /** What [command] printed, errors included; given up on after a while. */
-    private fun run(vararg command: String): String = try {
-        val process = ProcessBuilder(*command).redirectErrorStream(true).start()
-        var out = ""
-        // Read alongside, or a big dump fills the pipe and the command never ends.
-        val reader = thread(isDaemon = true) { out = runCatching { process.inputStream.bufferedReader().readText() }.getOrDefault("") }
-        if (!process.waitFor(TIMEOUT_S, TimeUnit.SECONDS)) {
-            process.destroy()
-            "(${command.joinToString(" ")}: sin respuesta en $TIMEOUT_S s)"
-        } else {
-            reader.join(2000)
-            out
-        }
-    } catch (e: Exception) {
-        "(${command.joinToString(" ")}: $e)"
-    }
+    private fun run(vararg command: String): String =
+        exec(TIMEOUT_S, *command) ?: "(${command.joinToString(" ")}: sin respuesta en $TIMEOUT_S s)"
 
     private const val TIMEOUT_S = 20L
     /** The headings inside each interface's part of network_stack's dump. */

@@ -68,8 +68,6 @@ object ShellLink {
     fun refresh() {
         if (display != null && display?.asBinder()?.isBinderAlive != true) lost()
     }
-    fun bind() = refresh()
-    fun uid() = if (display != null) 2000 else -1
     fun await(seconds: Long = 8): IBikeDisplay? {
         display?.let { return it }
         connected.await(seconds, TimeUnit.SECONDS)

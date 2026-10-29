@@ -35,13 +35,8 @@ import kotlin.system.exitProcess
  * the bike's off too. There it is made as the screen of a connected device instead, the way
  * screens streamed to a car or a computer are, and that kind keeps its own power.
  */
-class DisplayService() : IBikeDisplay.Stub() {
-    private var context: Context? = null
-
-    /** ShellMain supplies the shell package context. */
-    constructor(context: Context) : this() {
-        this.context = context
-    }
+/** [context] is the shell package's, from ShellMain. */
+class DisplayService(private val context: Context) : IBikeDisplay.Stub() {
 
     private val thread = HandlerThread("pantalla-moto").also { it.start() }
     private val handler = Handler(thread.looper)
@@ -135,6 +130,10 @@ class DisplayService() : IBikeDisplay.Stub() {
             say("pantalla para la moto deshecha: lo que había vuelve al móvil")
         }
         display = null
+        closeDevice()
+    }
+
+    private fun closeDevice() {
         device?.let { runCatching { it.javaClass.getMethod("close").invoke(it) } }
         device = null
     }
@@ -182,10 +181,11 @@ class DisplayService() : IBikeDisplay.Stub() {
     }
 
     private fun create(surface: Surface, width: Int, height: Int, dpi: Int): VirtualDisplay {
-        val first = Events()
-        val plain = displayManager().createVirtualDisplay(
-            "Pantalla de la moto", width, height, dpi, surface, flags(), first, handler
+        fun plainOne(events: Events) = displayManager.createVirtualDisplay(
+            "Pantalla de la moto", width, height, dpi, surface, flags(), events, handler
         )
+        val first = Events()
+        val plain = plainOne(first)
         // Before 14 there is no screen of its own to be had, and none was asked for.
         if (Build.VERSION.SDK_INT < 34 || !withThePhone(plain.display.displayId)) {
             return plain.also { first.of = it }
@@ -197,11 +197,8 @@ class DisplayService() : IBikeDisplay.Stub() {
             onOwnDevice(surface, width, height, dpi, events)
         } catch (e: Throwable) {
             say("no se pudo hacer como dispositivo conectado (${e.cause ?: e}): se apagará al bloquear")
-            device?.let { runCatching { it.javaClass.getMethod("close").invoke(it) } }
-            device = null
-            displayManager().createVirtualDisplay(
-                "Pantalla de la moto", width, height, dpi, surface, flags(), events, handler
-            )
+            closeDevice()
+            plainOne(events)
         }
         events.of = made
         return made
@@ -225,7 +222,7 @@ class DisplayService() : IBikeDisplay.Stub() {
     @SuppressLint("PrivateApi")
     @RequiresApi(34)
     private fun onOwnDevice(surface: Surface, width: Int, height: Int, dpi: Int, events: Events): VirtualDisplay {
-        val context = ShellContext(context ?: systemContext())
+        val context = ShellContext(context)
         val binder = Class.forName("android.os.ServiceManager")
             .getMethod("getService", String::class.java).invoke(null, "virtualdevice")
         val api = Class.forName("android.companion.virtual.IVirtualDeviceManager")
@@ -359,8 +356,7 @@ class DisplayService() : IBikeDisplay.Stub() {
 
     @SuppressLint("PrivateApi")
     private fun toFullScreen(task: TaskInfo) {
-        val atm = Class.forName("android.app.ActivityTaskManager")
-        val service = atm.getMethod("getService").invoke(null)!!
+        val service = taskService()
         service.javaClass.methods.first { it.name == "setTaskWindowingMode" && it.parameterCount == 3 }
             .invoke(service, task.taskId, WINDOWING_MODE_FULLSCREEN, false)
     }
@@ -379,7 +375,7 @@ class DisplayService() : IBikeDisplay.Stub() {
             return atm.getMethod("getTasks", int).invoke(instance, 100) as List<ActivityManager.RunningTaskInfo>
         }
         return runCatching {
-            val service = atm.getMethod("getService").invoke(null)!!
+            val service = taskService()
             service.javaClass.getMethod("getTasks", int).invoke(service, 100) as List<ActivityManager.RunningTaskInfo>
         }.getOrElse {
             val service = Class.forName("android.app.ActivityManager").getMethod("getService").invoke(null)!!
@@ -389,8 +385,7 @@ class DisplayService() : IBikeDisplay.Stub() {
 
     @SuppressLint("PrivateApi")
     private fun moveToDisplay(task: TaskInfo, displayId: Int) {
-        val atm = Class.forName("android.app.ActivityTaskManager")
-        val service = atm.getMethod("getService").invoke(null)!!
+        val service = taskService()
         // Android 12 calls it moveRootTaskToDisplay; 10 and 11, moveStackToDisplay.
         val move = service.javaClass.methods.first {
             (it.name == "moveRootTaskToDisplay" || it.name == "moveStackToDisplay") && it.parameterCount == 2
@@ -406,32 +401,24 @@ class DisplayService() : IBikeDisplay.Stub() {
      * DisplayManager checks the package against the caller, which here is the shell's, so it
      * gets a context that says so.
      */
-    private fun displayManager(): DisplayManager {
-        val shell = ShellContext(context ?: systemContext())
+    private val displayManager: DisplayManager by lazy {
         val make = DisplayManager::class.java.getDeclaredConstructor(Context::class.java)
         make.isAccessible = true
-        return make.newInstance(shell)
+        make.newInstance(ShellContext(context))
     }
 
+    /** ActivityTaskManager's service, where tasks are listed and moved. */
     @SuppressLint("PrivateApi")
-    private fun systemContext(): Context {
-        val at = Class.forName("android.app.ActivityThread")
-        val current = at.getMethod("currentActivityThread").invoke(null)
-            ?: at.getMethod("systemMain").invoke(null)
-        return at.getMethod("getSystemContext").invoke(current) as Context
-    }
+    private fun taskService(): Any =
+        Class.forName("android.app.ActivityTaskManager").getMethod("getService").invoke(null)!!
 
     private fun run(vararg command: String): String = tidy(output(*command))
     private fun tidy(text: String) = text.replace(Regex("\\s+"), " ").take(300)
 
-    private fun output(vararg command: String): String = try {
-        val process = ProcessBuilder(*command).redirectErrorStream(true).start()
-        val out = process.inputStream.bufferedReader().readText().trim()
-        process.waitFor()
-        out
-    } catch (e: Exception) {
-        e.toString()
-    }
+    /** What [command] printed; never held more than [COMMAND_S], since callers hold the lock. */
+    private fun output(vararg command: String): String =
+        // "Error" in it, so whoever looks for one in the answer sees it failed.
+        exec(COMMAND_S, *command)?.trim() ?: "Error: ${command.joinToString(" ")} sin respuesta en $COMMAND_S s"
 
     private fun say(text: String) {
         runCatching { log?.line(text) }
@@ -450,6 +437,8 @@ class DisplayService() : IBikeDisplay.Stub() {
 
     private companion object {
         const val SHELL = "com.android.shell"
+        /** Longest a system command is waited for: am start and cmd answer in well under that. */
+        const val COMMAND_S = 20L
 
         // DisplayManager.VIRTUAL_DISPLAY_FLAG_*, several of them hidden.
         const val PUBLIC = 1

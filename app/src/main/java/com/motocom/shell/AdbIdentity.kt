@@ -10,7 +10,6 @@ import org.bouncycastle.asn1.x500.X500Name
 import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter
 import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder
 import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder
-import org.bouncycastle.jce.provider.BouncyCastleProvider
 import java.io.File
 import java.math.BigInteger
 import java.security.KeyPairGenerator
@@ -49,11 +48,11 @@ class AdbIdentity(context: Context) : AbsAdbConnectionManager() {
             val pair = KeyPairGenerator.getInstance("RSA").apply { initialize(2048) }.generateKeyPair()
             key = pair.private
             val subject = X500Name("CN=Motocom")
-            val provider = BouncyCastleProvider()
             val builder = JcaX509v3CertificateBuilder(subject, BigInteger.valueOf(System.currentTimeMillis()),
                 Date(System.currentTimeMillis() - 86400000), Date(System.currentTimeMillis() + 10L * 365 * 86400000), subject, pair.public)
-            cert = JcaX509CertificateConverter().setProvider(provider).getCertificate(
-                builder.build(JcaContentSignerBuilder("SHA256withRSA").setProvider(provider).build(key)))
+            // Android's own providers sign and read it: BouncyCastle's would pull in all its classes.
+            cert = JcaX509CertificateConverter().getCertificate(
+                builder.build(JcaContentSignerBuilder("SHA256withRSA").build(key)))
             val store = java.security.KeyStore.getInstance("PKCS12")
             store.load(null, password)
             store.setKeyEntry("adb", key, password, arrayOf(cert))

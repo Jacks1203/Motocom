@@ -79,12 +79,8 @@ object ShellMain {
         }
     }
 
-    private fun installed(): Boolean = runCatching {
-        val pm = ProcessBuilder("pm", "path", "com.motocom").redirectErrorStream(true).start()
-        val said = pm.inputStream.bufferedReader().readText()
-        pm.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)
-        said.contains("package:")
-    }.getOrDefault(true)
+    /** Not knowing counts as installed: forgetting the pairing of an installed app costs more. */
+    private fun installed(): Boolean = exec(5, "pm", "path", "com.motocom")?.contains("package:") ?: true
 
     /** /proc/<pid> belongs to the uid that runs it; the shell may see every process. */
     private fun appRunning(uid: Int): Boolean =

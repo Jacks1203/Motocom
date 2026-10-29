@@ -69,7 +69,6 @@ enum class BikeState { LISTENING, GREETED, SHOWING, CLOSED }
 interface BikeEvents {
     fun log(line: String)
     fun state(state: BikeState) {}
-    fun input(input: BikeInput) {}
 
     /**
      * The bike's side of the conversation died without the phone closing it. Said once per
@@ -129,16 +128,11 @@ class BikeLink(
     @Volatile var bikeInfo: JsonObject? = null
         private set
 
-    /** The ports really taken, which only differ from the ones asked for in tests. */
-    var pxcPortBound = 0; private set
-    var controlPortBound = 0; private set
-    var dataPortBound = 0; private set
-
     @Throws(IOException::class)
     fun open() {
-        pxcPortBound = listen("pxc", pxcPort, ::pxc)
-        controlPortBound = listen("control", controlPort, ::control)
-        dataPortBound = listen("data", dataPort, ::data)
+        listen("pxc", pxcPort, ::pxc)
+        listen("control", controlPort, ::control)
+        listen("data", dataPort, ::data)
         events.state(BikeState.LISTENING)
     }
 
@@ -188,7 +182,7 @@ class BikeLink(
         events.state(BikeState.CLOSED)
     }
 
-    private fun listen(name: String, port: Int, serve: (Socket) -> Unit): Int {
+    private fun listen(name: String, port: Int, serve: (Socket) -> Unit) {
         val door = ServerSocket(port, 50)
         synchronized(doors) { doors += door }
         thread(name = "moto-$name", isDaemon = true) {
@@ -230,7 +224,6 @@ class BikeLink(
                 }
             }
         }
-        return door.localPort
     }
 
     // ---- The conversation ---------------------------------------------------------------
@@ -447,10 +440,8 @@ class BikeLink(
                         events.log(if (started) "la moto pide empezar: codificador listo" else "la moto pide empezar y no se puede ($wanted)")
                         Rv.write(output, if (started) Rv.START + 1 else Rv.START_FAILED)
                     }
-                    Rv.KEY_OR_TOUCH -> BikeInput.parse(asked.body)?.let {
-                        events.log("la moto manda una pulsación: $it")
-                        events.input(it)
-                    }
+                    // Nothing comes of them on this bike; the record says if one ever does.
+                    Rv.KEY_OR_TOUCH -> BikeInput.parse(asked.body)?.let { events.log("la moto manda una pulsación: $it") }
                     Rv.SHELL -> {
                         val answer = when (String(asked.body).trim('\u0000', ' ')) {
                             "getprop ro.build.version.release" -> card.androidSdk.toString()
@@ -513,11 +504,10 @@ class BikeLink(
         var countedFrom = System.currentTimeMillis()
         val length = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN)
         while (!closed && dataTurn.get() == turn) {
-            val now = request ?: run {
+            wanted = request ?: run {
                 events.log("datos: la moto ya no pide imagen")
                 return
             }
-            if (now !== wanted) wanted = now
             val wait = if (wanted.fps <= 0) {
                 val next = Rv.read(input)
                 if (next.command != Rv.NEXT_FRAME) {

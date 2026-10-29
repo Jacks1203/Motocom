@@ -37,8 +37,6 @@ object Language {
     }
 
     /** In Spanish whatever the choice, for the log, which is a record for whoever fixes the app. */
-    fun spanish(context: Context, id: Int, vararg args: Any): String = format(inSpanish(context), id, args)
-
     fun inSpanish(context: Context): Context =
         spanishContext ?: inLanguage(context.applicationContext, SPANISH).also { spanishContext = it }
 
