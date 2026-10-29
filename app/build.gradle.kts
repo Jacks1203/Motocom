@@ -18,6 +18,8 @@ android {
         versionCode = 18
         versionName = "0.18"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        // Phones only: the x86 copies of the native libraries are for emulators.
+        ndk { abiFilters += setOf("arm64-v8a", "armeabi-v7a") }
         // Lets codigo/moto_falsa.py in through `adb forward`; never in a published build.
         val cableTests = findProperty("cableTests") == "true"
         buildConfigField("boolean", "CABLE_TESTS", cableTests.toString())
@@ -42,7 +44,9 @@ android {
             buildConfigField("boolean", "CABLE_TESTS", "true")
         }
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             if (signing != null) signingConfig = signingConfigs.getByName("release")
         }
     }
@@ -50,9 +54,12 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
+    // The app speaks Spanish and English; the libraries bring dozens more.
+    androidResources { localeFilters += listOf("es", "en") }
     // The language is chosen inside the app, so every one must be installed, not only the phone's.
     bundle { language { enableSplit = false } }
-    packaging { resources.excludes += "META-INF/versions/9/OSGI-INF/MANIFEST.MF" }
+    // BouncyCastle's post-quantum tables: nothing in the app or in ADB uses them.
+    packaging { resources.excludes += setOf("META-INF/versions/9/OSGI-INF/MANIFEST.MF", "org/bouncycastle/pqc/**") }
     buildFeatures {
         compose = true
         aidl = true
