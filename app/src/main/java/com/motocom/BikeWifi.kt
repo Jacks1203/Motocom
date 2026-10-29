@@ -43,6 +43,8 @@ class BikeWifi(
     private var asked = false
     private var joined = false
     private var triedPassword = false
+    /** Whether a half-made link of the phone's with the bike has been undone in this start. */
+    private var cleaned = false
     /** Once the phone has asked to get in, a group it ends up running is one it made by asking. */
     private var askedOnce = false
     private var lastSeen = ""
@@ -76,8 +78,16 @@ class BikeWifi(
         log("sigue fuera tras ${PASSWORD_AFTER_MS / 1000} s: entrando a ${known.ssid} con la contraseña del QR")
         runCatching {
             val config = WifiP2pConfig.Builder().setNetworkName(known.ssid).setPassphrase(known.password).build()
-            wifi.cancelConnect(on, null)
-            wifi.connect(on, config, result("entrar con la contraseña"))
+            // Connecting before the cancel is done fails with error 0.
+            val connect = {
+                runCatching {
+                    if (listening && !joined && on === channel) wifi.connect(on, config, result("entrar con la contraseña"))
+                }.onFailure { log("entrar con la contraseña: no se pudo (${it.message ?: it})") }
+            }
+            wifi.cancelConnect(on, object : WifiP2pManager.ActionListener {
+                override fun onSuccess() { connect() }
+                override fun onFailure(reason: Int) { connect() }
+            })
         }.onFailure { log("entrar con la contraseña: no se pudo (${it.message ?: it})") }
     }
 
@@ -117,6 +127,7 @@ class BikeWifi(
         askedOnce = false
         joined = false
         triedPassword = false
+        cleaned = false
         lastSeen = ""
         otherGroup = ""
         failures.clear()
@@ -145,6 +156,9 @@ class BikeWifi(
         val wifi = manager ?: return
         val on = channel ?: return
         runCatching { wifi.stopPeerDiscovery(on, null) }
+        // A request to get in still going on, or half done, would be left behind in the system,
+        // and the next start would find the bike "connected" and fail to ask again.
+        if (askedOnce && !joined) runCatching { wifi.cancelConnect(on, null) }
         // Only the bike's group: another one the phone is in is none of this app's business.
         if (joined) runCatching { wifi.removeGroup(on, null) }
         joined = false
@@ -173,6 +187,15 @@ class BikeWifi(
             }
             log("moto a la vista: ${found.deviceName} (${status(found.status)})")
             asked = true
+            if (!cleaned && (found.status == WifiP2pDevice.CONNECTED || found.status == WifiP2pDevice.INVITED)) {
+                // "Connected" or "invited" is how the bike stands with this phone, not with others:
+                // something left behind by an earlier attempt. Asking again on top of it fails with
+                // error 0, so undo it and ask afresh.
+                cleaned = true
+                log("el móvil ya tenía una conexión a medias con la moto: se deshace y se vuelve a pedir")
+                undoHalfLink(on)
+                return@requestPeers
+            }
             askedOnce = true
             val config = WifiP2pConfig().apply {
                 deviceAddress = found.deviceAddress
@@ -186,6 +209,29 @@ class BikeWifi(
                 log("pedir entrar en el wifi de la moto: no se pudo (${it.message ?: it})")
             }
         }
+    }
+
+    private fun undoHalfLink(on: WifiP2pManager.Channel) {
+        val wifi = manager ?: return
+        val again = Runnable {
+            if (!listening || on !== channel || joined) return@Runnable
+            asked = false
+            runCatching { wifi.discoverPeers(on, result("buscar aparatos por wifi directo", quiet = true)) }
+        }
+        val removeGroup = {
+            runCatching {
+                wifi.removeGroup(on, object : WifiP2pManager.ActionListener {
+                    override fun onSuccess() { main.postDelayed(again, UNDO_WAIT_MS) }
+                    override fun onFailure(reason: Int) { main.postDelayed(again, UNDO_WAIT_MS) }
+                })
+            }.onFailure { main.postDelayed(again, UNDO_WAIT_MS) }
+        }
+        runCatching {
+            wifi.cancelConnect(on, object : WifiP2pManager.ActionListener {
+                override fun onSuccess() { removeGroup() }
+                override fun onFailure(reason: Int) { removeGroup() }
+            })
+        }.onFailure { removeGroup() }
     }
 
     private fun lookAtGroup() {
@@ -215,7 +261,7 @@ class BikeWifi(
                 }
                 return@requestConnectionInfo
             }
-            val owner = info.groupOwnerAddress ?: return@requestConnectionInfo
+            val owner = info.groupOwnerAddress ?: return@requestConnectionInfo sayOtherGroup("uno formado, pero el sistema no da la dirección del jefe")
             wifi.requestGroupInfo(on) { group ->
                 if (!listening || on !== channel || joined) return@requestGroupInfo
                 // Some phones give no group here even with one formed; without a name, it is
@@ -285,6 +331,8 @@ class BikeWifi(
         /** Carbit took seven seconds to get in by asking. */
         const val PASSWORD_AFTER_MS = 25_000L
         const val LOOK_AGAIN_MS = 30_000L
+        /** Time for the system to let go of the half-made link before asking again. */
+        const val UNDO_WAIT_MS = 2_000L
     }
 
     private fun status(status: Int) = when (status) {
