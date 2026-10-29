@@ -5,9 +5,11 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.net.NetworkInfo
 import android.net.wifi.WpsInfo
 import android.net.wifi.p2p.WifiP2pConfig
 import android.net.wifi.p2p.WifiP2pDevice
+import android.net.wifi.p2p.WifiP2pGroup
 import android.net.wifi.p2p.WifiP2pInfo
 import android.net.wifi.p2p.WifiP2pManager
 import android.os.Build
@@ -56,6 +58,10 @@ class BikeWifi(
     private var askedOnce = false
     private var lastSeen = ""
     private var otherGroup = ""
+    /** The last of each thing the system has said about wifi direct, to write only changes. */
+    private var lastLink = ""
+    private var lastSelf = ""
+    private var lastBike = -1
     /** The last failure of each quiet call, so that the same one is said once and not every 30 s. */
     private val failures = mutableMapOf<String, Int>()
     private val main = Handler(Looper.getMainLooper())
@@ -117,8 +123,22 @@ class BikeWifi(
     private val receiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             when (intent.action) {
-                WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION -> lookAtPeers()
-                WifiP2pManager.WIFI_P2P_CONNECTION_CHANGED_ACTION -> lookAtGroup()
+                WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION -> {
+                    watchBike()
+                    lookAtPeers()
+                }
+                WifiP2pManager.WIFI_P2P_CONNECTION_CHANGED_ACTION -> {
+                    sayLink(intent)
+                    lookAtGroup()
+                }
+                WifiP2pManager.WIFI_P2P_STATE_CHANGED_ACTION -> {
+                    val state = intent.getIntExtra(WifiP2pManager.EXTRA_WIFI_STATE, -1)
+                    if (state == WifiP2pManager.WIFI_P2P_STATE_DISABLED) log("wifi directo: el sistema dice que está apagado")
+                }
+                WifiP2pManager.WIFI_P2P_THIS_DEVICE_CHANGED_ACTION -> {
+                    @Suppress("DEPRECATION")
+                    saySelf(intent.getParcelableExtra<WifiP2pDevice>(WifiP2pManager.EXTRA_WIFI_P2P_DEVICE))
+                }
             }
         }
     }
@@ -140,6 +160,9 @@ class BikeWifi(
         groupWaits = 0
         lastSeen = ""
         otherGroup = ""
+        lastLink = ""
+        lastSelf = ""
+        lastBike = -1
         failures.clear()
         log(if (bike != null) "buscando la moto del QR: ${bike.name}" else "sin QR leído: buscando un aparato que empiece por $DEFAULT_PREFIX")
         main.postDelayed(usePassword, PASSWORD_AFTER_MS)
@@ -148,10 +171,14 @@ class BikeWifi(
             IntentFilter().apply {
                 addAction(WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION)
                 addAction(WifiP2pManager.WIFI_P2P_CONNECTION_CHANGED_ACTION)
+                addAction(WifiP2pManager.WIFI_P2P_STATE_CHANGED_ACTION)
+                addAction(WifiP2pManager.WIFI_P2P_THIS_DEVICE_CHANGED_ACTION)
             },
             ContextCompat.RECEIVER_NOT_EXPORTED
         )
         listening = true
+        // Android no longer repeats the phone's own state on registering: ask for it.
+        runCatching { wifi.requestDeviceInfo(on) { self -> if (listening && on === channel) saySelf(self) } }
         // The phone may still be in the bike's group from the last time.
         lookAtGroup()
         wifi.discoverPeers(on, result("buscar aparatos por wifi directo"))
@@ -195,7 +222,7 @@ class BikeWifi(
                 lastSeen = names
                 return@requestPeers
             }
-            log("moto a la vista: ${found.deviceName} (${status(found.status)})")
+            log("moto a la vista: ${found.deviceName} (${describe(found)})")
             val linked = found.status == WifiP2pDevice.CONNECTED || found.status == WifiP2pDevice.INVITED
             if (linked && !groupChecked) {
                 // The phone may still be in the bike's group from the last time, which is good:
@@ -232,6 +259,67 @@ class BikeWifi(
             }
         }
     }
+
+    /**
+     * Every change of how the bike stands with the phone, also while the phone is waiting for an
+     * answer and [lookAtPeers] does not look: where a link gets stuck is in these.
+     */
+    private fun watchBike() {
+        if (!listening || joined) return
+        val wifi = manager ?: return
+        val on = channel ?: return
+        wifi.requestPeers(on) { peers ->
+            if (!listening || on !== channel || joined) return@requestPeers
+            val found = peers?.deviceList.orEmpty().firstOrNull {
+                val name = it.deviceName.orEmpty()
+                if (bike != null) name == bike.name else name.startsWith(DEFAULT_PREFIX)
+            }
+            val now = found?.status ?: NOT_SEEN
+            if (now != lastBike && lastBike != -1) {
+                log("la moto pasa a: ${if (found == null) "no se ve" else describe(found)}")
+            }
+            lastBike = now
+        }
+    }
+
+    /** What the system says each time the phone's wifi direct link changes, as it says it. */
+    @Suppress("DEPRECATION")
+    private fun sayLink(intent: Intent) {
+        if (!listening) return
+        val network = intent.getParcelableExtra<NetworkInfo>(WifiP2pManager.EXTRA_NETWORK_INFO)
+        val info = intent.getParcelableExtra<WifiP2pInfo>(WifiP2pManager.EXTRA_WIFI_P2P_INFO)
+        val group = intent.getParcelableExtra<WifiP2pGroup>(WifiP2pManager.EXTRA_WIFI_P2P_GROUP)
+        val said = buildString {
+            append("enlace wifi directo: ")
+            append(network?.detailedState?.name?.lowercase() ?: "?")
+            append(if (info == null) ", grupo ?" else if (info.groupFormed) ", grupo formado" else ", sin grupo")
+            if (info?.groupFormed == true) {
+                append(if (info.isGroupOwner) ", el móvil es el jefe" else ", jefe ${info.groupOwnerAddress?.hostAddress ?: "sin dirección"}")
+            }
+            if (group != null) {
+                append(", red ${group.networkName ?: "?"}")
+                if (group.frequency > 0) append(" a ${group.frequency} MHz")
+                group.owner?.deviceName?.takeIf { it.isNotEmpty() }?.let { append(" de $it") }
+            }
+            network?.reason?.takeIf { it.isNotEmpty() }?.let { append(" ($it)") }
+        }
+        if (said != lastLink) log(said)
+        lastLink = said
+    }
+
+    private fun saySelf(self: WifiP2pDevice?) {
+        val said = "estado del móvil en wifi directo: ${self?.let { status(it.status) } ?: "?"}"
+        if (said != lastSelf) log(said)
+        lastSelf = said
+    }
+
+    /**
+     * How the bike stands, and whether it already says it runs a group: then "connected" means
+     * the phone was let in but did not get onto its wifi.
+     */
+    private fun describe(found: WifiP2pDevice) =
+        "${status(found.status)}, jefe de grupo ${if (found.isGroupOwner) "sí" else "no"}, " +
+            "botón ${if (found.wpsPbcSupported()) "sí" else "no"}, ${found.deviceAddress}"
 
     private fun undoHalfLink(on: WifiP2pManager.Channel) {
         val wifi = manager ?: return
@@ -370,6 +458,8 @@ class BikeWifi(
         const val GROUP_WAIT_MS = 1_000L
         const val OWNER_RETRIES = 5
         const val GROUP_WAITS = 5
+        /** [lastBike] when the bike is not among what the phone sees. */
+        const val NOT_SEEN = -2
     }
 
     private fun status(status: Int) = when (status) {

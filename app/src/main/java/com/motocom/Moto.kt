@@ -451,6 +451,17 @@ class Moto private constructor(private val context: Context) {
             "ubicación ${if (location != null && LocationManagerCompat.isLocationEnabled(location)) "encendida" else "APAGADA"}, " +
             "ADB ${if (ShellLink.ready) "READY" else "NOT_RUNNING"} (uid ${ShellLink.uid()}), " +
             "depuración USB ${if (ShellLink.usbDebuggingOn()) "encendida" else "APAGADA"}, app ${chosenApp.value ?: "ninguna"} a ${dpi.intValue} ppp")
+        // Some phones cannot be in a home wifi and in the bike's at once on different bands.
+        @Suppress("DEPRECATION")
+        val home = runCatching { wifi?.connectionInfo }.getOrNull()
+        log(
+            if (home == null || home.frequency <= 0) "wifi normal: sin conectar a ninguna red"
+            else "wifi normal: conectado a ${home.frequency} MHz (${when {
+                home.frequency >= 5925 -> "6 GHz"
+                home.frequency >= 4900 -> "5 GHz"
+                else -> "2,4 GHz"
+            }})"
+        )
     }
 
     /**
