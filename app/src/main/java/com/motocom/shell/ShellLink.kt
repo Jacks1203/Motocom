@@ -53,7 +53,8 @@ object ShellLink {
         this.log = log
         paired.value = prefs.getBoolean(KEY_PAIRED, false)
         // The app died while it had wireless debugging on for a start: leave the phone as it was.
-        if (prefs.getBoolean(KEY_SWITCHED, false) && !busy.value) {
+        // Not with USB debugging off and a worker maybe alive, which would die with it; [lost] does it then.
+        if (prefs.getBoolean(KEY_SWITCHED, false) && !busy.value && (usbDebuggingOn() || !workerMayLive())) {
             if (canWriteSettings() && setWirelessDebugging(false)) log("depuración inalámbrica apagada: la dejó encendida un inicio que no acabó")
             prefs.edit().remove(KEY_SWITCHED).apply()
         }
@@ -75,6 +76,7 @@ object ShellLink {
         return display
     }
     private fun lost() {
+        log("el proceso ADB se ha cerrado (depuración USB ${if (usbDebuggingOn()) "encendida" else "APAGADA"})")
         display = null
         connected = CountDownLatch(1)
         main.post {
@@ -82,6 +84,11 @@ object ShellLink {
             failed.value = false
             message.value = Said(R.string.adb_closed)
             onLost?.invoke()
+            // Left on for this worker only, with USB debugging off: with it gone, leave the phone as it was.
+            if (prefs.getBoolean(KEY_SWITCHED, false) && !busy.value) {
+                if (canWriteSettings() && setWirelessDebugging(false)) log("depuración inalámbrica apagada: ya no hay proceso ADB que la necesite")
+                prefs.edit().remove(KEY_SWITCHED).apply()
+            }
         }
     }
     internal fun attach(binder: IBinder, token: String): IBinder {
@@ -171,10 +178,16 @@ object ShellLink {
             return launch(adb)
         } finally {
             adb.disconnect()
-            // The worker no longer needs it, so leave the phone as it was.
+            // The worker no longer needs it, so leave the phone as it was. Not with USB debugging
+            // off, though: then adbd stops with wireless debugging, and the worker goes with it.
+            // The mark stays, so that [lost] or [init] switch it off once the worker is gone.
             if (switched) {
-                setWirelessDebugging(false)
-                prefs.edit().remove(KEY_SWITCHED).commit()
+                if (usbDebuggingOn() || display == null) {
+                    setWirelessDebugging(false)
+                    prefs.edit().remove(KEY_SWITCHED).commit()
+                } else {
+                    log("depuración inalámbrica encendida: con la depuración USB apagada, apagarla pararía ADB")
+                }
             }
         }
     }
@@ -219,14 +232,22 @@ object ShellLink {
      * moment instead of starting a second one.
      */
     private fun survivor(): IBikeDisplay? {
-        val boot = System.currentTimeMillis() - SystemClock.elapsedRealtime()
-        if (prefs.getLong(KEY_STARTED, 0) < boot) return null
+        if (!workerMayLive()) return null
         main.post { message.value = Said(R.string.adb_survivor) }
         return await(6)
     }
 
+    /** A worker was started since the phone last booted, so it may still be alive. */
+    private fun workerMayLive() =
+        prefs.getLong(KEY_STARTED, 0) >= System.currentTimeMillis() - SystemClock.elapsedRealtime()
+
     private fun canWriteSettings() =
         context.checkSelfPermission(Manifest.permission.WRITE_SECURE_SETTINGS) == PackageManager.PERMISSION_GRANTED
+    /**
+     * Without it, adbd runs only while wireless debugging is on, which Android also switches off
+     * on changing wifi, as when the phone joins the bike's: the worker dies with adbd.
+     */
+    fun usbDebuggingOn() = Settings.Global.getInt(context.contentResolver, Settings.Global.ADB_ENABLED, 0) == 1
     private fun wirelessDebuggingOn() = Settings.Global.getInt(context.contentResolver, ADB_WIFI, 0) == 1
     private fun setWirelessDebugging(on: Boolean) = runCatching {
         Settings.Global.putInt(context.contentResolver, ADB_WIFI, if (on) 1 else 0)

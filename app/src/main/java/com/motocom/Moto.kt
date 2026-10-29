@@ -106,6 +106,9 @@ class Moto private constructor(private val context: Context) {
             toast(text(it))
             return
         }
+        // Not a reason to stop: maybe it is enough on this phone, and the record will tell.
+        // The home screen already says so.
+        if (!ShellLink.usbDebuggingOn()) log("aviso: la depuración USB está apagada; sin ella ADB se para al cambiar de wifi")
         ShellLink.refresh()
         if (ShellLink.ready) {
             start()
@@ -446,7 +449,8 @@ class Moto private constructor(private val context: Context) {
         log("Motocom ${BuildConfig.VERSION_NAME} en ${Build.BRAND} ${Build.MODEL}, Android ${Build.VERSION.RELEASE} (${Build.VERSION.SDK_INT})")
         log("wifi ${if (wifi?.isWifiEnabled == true) "encendido" else "APAGADO"}, " +
             "ubicación ${if (location != null && LocationManagerCompat.isLocationEnabled(location)) "encendida" else "APAGADA"}, " +
-            "ADB ${if (ShellLink.ready) "READY" else "NOT_RUNNING"} (uid ${ShellLink.uid()}), app ${chosenApp.value ?: "ninguna"} a ${dpi.intValue} ppp")
+            "ADB ${if (ShellLink.ready) "READY" else "NOT_RUNNING"} (uid ${ShellLink.uid()}), " +
+            "depuración USB ${if (ShellLink.usbDebuggingOn()) "encendida" else "APAGADA"}, app ${chosenApp.value ?: "ninguna"} a ${dpi.intValue} ppp")
     }
 
     /**
