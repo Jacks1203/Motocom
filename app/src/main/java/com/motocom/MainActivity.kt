@@ -550,8 +550,8 @@ class MainActivity : ComponentActivity() {
      */
     @Composable
     private fun appIcon(pkg: String): ImageBitmap? = produceState(icons.get(pkg), pkg) {
-        if (value != null) return@produceState
-        value = withContext(Dispatchers.IO) {
+        // The state outlives a change of app, holding the last one's icon: always set it anew.
+        value = icons.get(pkg) ?: withContext(Dispatchers.IO) {
             runCatching { packageManager.getApplicationIcon(pkg).toBitmap(96, 96).asImageBitmap() }.getOrNull()
                 ?.also { icons.put(pkg, it) }
         }

@@ -80,7 +80,8 @@ class Moto private constructor(private val context: Context) {
             trimLog()
             // Only the end, without the system's reports, which are for whoever reads the file.
             val old = runCatching { if (file.exists()) tail(TAIL_BYTES) else null }.getOrNull()
-                ?.lines()?.drop(1)?.filter { it.isNotEmpty() && !it.startsWith(REPORT_INDENT) }?.takeLast(200)
+                // Only a read from the middle starts with a cut line.
+                ?.lines()?.drop(if (file.length() > TAIL_BYTES) 1 else 0)?.filter { it.isNotEmpty() && !it.startsWith(REPORT_INDENT) }?.takeLast(200)
             if (old != null) main.post { lines.addAll(0, old) }
         }
         ShellLink.onReady = {

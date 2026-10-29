@@ -417,7 +417,8 @@ class DisplayService(private val context: Context) : IBikeDisplay.Stub() {
 
     /** What [command] printed; never held more than [COMMAND_S], since callers hold the lock. */
     private fun output(vararg command: String): String =
-        exec(COMMAND_S, *command)?.trim() ?: "${command.joinToString(" ")}: sin respuesta en $COMMAND_S s"
+        // "Error" in it, so whoever looks for one in the answer sees it failed.
+        exec(COMMAND_S, *command)?.trim() ?: "Error: ${command.joinToString(" ")} sin respuesta en $COMMAND_S s"
 
     private fun say(text: String) {
         runCatching { log?.line(text) }
