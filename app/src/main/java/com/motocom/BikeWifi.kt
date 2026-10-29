@@ -15,6 +15,7 @@ import android.net.wifi.p2p.WifiP2pManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import androidx.core.content.ContextCompat
 import com.motocom.bike.BikeQr
 import java.net.Inet4Address
@@ -37,7 +38,9 @@ class BikeWifi(
     private val bike: BikeQr?,
     private val onJoined: (bike: InetAddress, phone: InetAddress?) -> Unit,
     /** The bike's wifi is gone: switched off, most likely. */
-    private val onLeft: () -> Unit = {}
+    private val onLeft: () -> Unit = {},
+    /** The phone got into the bike's wifi but left it with no address: the system's report is wanted. */
+    private val onNoAddress: () -> Unit = {}
 ) {
     private val manager = context.getSystemService(Context.WIFI_P2P_SERVICE) as WifiP2pManager?
     private var channel: WifiP2pManager.Channel? = null
@@ -62,6 +65,17 @@ class BikeWifi(
     private var lastLink = ""
     private var lastSelf = ""
     private var lastBike = -1
+    /** How the phone itself stands in wifi direct, as the system last said. */
+    private var selfStatus = -1
+    /** The password's turn came while the phone was in, waiting for an address: it goes next. */
+    private var passwordPending = false
+    /**
+     * When the phone got into what it asked for in this start, still without an address; 0 when
+     * not. Only after asking, so a group of somebody else's (Smart View, Quick Share) is not it.
+     */
+    private var waitingSince = 0L
+    /** Given up waiting with the bike's group maybe still up, which [stop] has to undo. */
+    private var groupLeft = false
     /** The last failure of each quiet call, so that the same one is said once and not every 30 s. */
     private val failures = mutableMapOf<String, Int>()
     private val main = Handler(Looper.getMainLooper())
@@ -75,6 +89,14 @@ class BikeWifi(
         val on = channel
         val known = bike
         if (!listening || joined || triedPassword || wifi == null || on == null || known == null) return@Runnable
+        if (waitingForAddress()) {
+            // Asking now would fail on top of the link (error 0) and cut the wait for the address
+            // short: it goes once the system lets this link go.
+            if (!passwordPending) log("la contraseña del QR se probará cuando acabe este intento, que espera dirección")
+            passwordPending = true
+            return@Runnable
+        }
+        passwordPending = false
         // Android throws rather than refuse when the name or the password are not to its liking.
         val wrong = when {
             Build.VERSION.SDK_INT < 29 -> "este móvil no lo permite"
@@ -91,15 +113,24 @@ class BikeWifi(
         log("sigue fuera tras ${PASSWORD_AFTER_MS / 1000} s: entrando a ${known.ssid} con la contraseña del QR")
         runCatching {
             val config = WifiP2pConfig.Builder().setNetworkName(known.ssid).setPassphrase(known.password).build()
-            // Connecting before the cancel is done fails with error 0.
+            // Connecting before the cancel is done, or with a half group still there, fails with error 0.
             val connect = {
                 runCatching {
                     if (listening && !joined && on === channel) wifi.connect(on, config, result("entrar con la contraseña"))
                 }.onFailure { log("entrar con la contraseña: no se pudo (${it.message ?: it})") }
             }
+            val removeGroup = {
+                runCatching {
+                    if (!listening || on !== channel) return@runCatching
+                    wifi.removeGroup(on, object : WifiP2pManager.ActionListener {
+                        override fun onSuccess() { main.postDelayed({ connect() }, UNDO_WAIT_MS) }
+                        override fun onFailure(reason: Int) { connect() }
+                    })
+                }.onFailure { connect() }
+            }
             wifi.cancelConnect(on, object : WifiP2pManager.ActionListener {
-                override fun onSuccess() { connect() }
-                override fun onFailure(reason: Int) { connect() }
+                override fun onSuccess() { removeGroup() }
+                override fun onFailure(reason: Int) { removeGroup() }
             })
         }.onFailure { log("entrar con la contraseña: no se pudo (${it.message ?: it})") }
     }
@@ -112,7 +143,8 @@ class BikeWifi(
         override fun run() {
             if (!listening) return
             val on = channel
-            if (!joined && on != null) {
+            // Looking now would take the radio off the bike's channel while it gives the address.
+            if (!joined && on != null && !waitingForAddress()) {
                 asked = false
                 runCatching { manager?.discoverPeers(on, result("buscar aparatos por wifi directo", quiet = true)) }
             }
@@ -163,6 +195,10 @@ class BikeWifi(
         lastLink = ""
         lastSelf = ""
         lastBike = -1
+        selfStatus = -1
+        passwordPending = false
+        waitingSince = 0L
+        groupLeft = false
         failures.clear()
         log(if (bike != null) "buscando la moto del QR: ${bike.name}" else "sin QR leído: buscando un aparato que empiece por $DEFAULT_PREFIX")
         main.postDelayed(usePassword, PASSWORD_AFTER_MS)
@@ -197,7 +233,10 @@ class BikeWifi(
         // and the next start would find the bike "connected" and fail to ask again.
         if (askedOnce && !joined) runCatching { wifi.cancelConnect(on, null) }
         // Only the bike's group: another one the phone is in is none of this app's business.
-        if (joined) runCatching { wifi.removeGroup(on, null) }
+        // Waiting for an address, it is the one asked for, and left there the next start would wait on it.
+        if (joined || waitingSince > 0 || groupLeft) runCatching { wifi.removeGroup(on, null) }
+        waitingSince = 0L
+        groupLeft = false
         joined = false
         channel = null
         runCatching { on.close() }
@@ -235,6 +274,7 @@ class BikeWifi(
                 }
                 groupChecked = true
             }
+            if (linked && waitingForAddress()) return@requestPeers
             asked = true
             if (linked && !cleaned && !askedOnce && !triedPassword) {
                 // "Connected" or "invited" is how the bike stands with this phone, not with others.
@@ -311,6 +351,84 @@ class BikeWifi(
         val said = "estado del móvil en wifi directo: ${self?.let { status(it.status) } ?: "?"}"
         if (said != lastSelf) log(said)
         lastSelf = said
+        val now = self?.status ?: return
+        val was = selfStatus
+        selfStatus = now
+        if (!listening || joined) return
+        if (now == WifiP2pDevice.CONNECTED && was != WifiP2pDevice.CONNECTED && (askedOnce || triedPassword)) {
+            // In the bike's wifi: what is missing now is the address it hands out.
+            waitingSince = SystemClock.elapsedRealtime()
+            sayGroup()
+            main.postDelayed(sayAddresses, ADDRESS_LOOK_MS)
+            main.postDelayed(noAddress, ADDRESS_WAIT_MS)
+        } else if (now != WifiP2pDevice.CONNECTED && waitingSince > 0) {
+            stopWaiting()
+            log("el móvil ha salido del wifi de la moto sin recibir dirección")
+            noAddressAfter()
+        }
+    }
+
+    /**
+     * In the bike's wifi, still without an address: Android is waiting for the bike's. Not past
+     * [ADDRESS_WAIT_MS], in case the system never says the wait is over.
+     */
+    private fun waitingForAddress() =
+        !joined && waitingSince > 0 && SystemClock.elapsedRealtime() - waitingSince < ADDRESS_WAIT_MS
+
+    private fun stopWaiting() {
+        waitingSince = 0L
+        main.removeCallbacks(sayAddresses)
+        main.removeCallbacks(noAddress)
+    }
+
+    /** What comes after getting in without an address: telling, then the password if it was put off. */
+    private fun noAddressAfter() {
+        onNoAddress()
+        if (listening && passwordPending) main.postDelayed(usePassword, PASSWORD_AFTER_UNDO_MS)
+    }
+
+    /** The group the phone is in while it waits: the bike's band and channel, its interface. */
+    private fun sayGroup() {
+        val wifi = manager ?: return
+        val on = channel ?: return
+        runCatching {
+            wifi.requestGroupInfo(on) { group ->
+                if (!listening || on !== channel) return@requestGroupInfo
+                if (group == null) return@requestGroupInfo log("grupo de wifi directo según el sistema: ninguno todavía")
+                val name = group.networkName.orEmpty()
+                if (group.isGroupOwner || (name.isNotEmpty() && !isBikes(name, group.owner?.deviceName))) {
+                    // Somebody else's group, or one of the phone's own: not a wait for the bike's address.
+                    if (waitingSince > 0) stopWaiting()
+                }
+                log("grupo de wifi directo según el sistema: red ${group.networkName ?: "?"}, " +
+                    "${if (group.frequency > 0) "${group.frequency} MHz" else "frecuencia ?"}, interfaz ${group.`interface` ?: "?"}, " +
+                    "jefe ${group.owner?.deviceName ?: "?"} ${group.owner?.deviceAddress ?: ""}, el móvil ${if (group.isGroupOwner) "es el jefe" else "es cliente"}")
+            }
+        }.onFailure { log("grupo de wifi directo: no se pudo preguntar (${it.message ?: it})") }
+    }
+
+    /** Whether the wifi direct interface has got an address even though Android has not said so. */
+    private val sayAddresses = Runnable {
+        if (!listening || joined) return@Runnable
+        val found = runCatching {
+            NetworkInterface.getNetworkInterfaces().asSequence().filter { it.name.startsWith("p2p") }
+                .map { nic -> "${nic.name}: ${nic.inetAddresses.asSequence().joinToString { it.hostAddress.orEmpty().substringBefore('%') }.ifEmpty { "sin direcciones" }}" }
+                .joinToString("; ")
+        }.getOrElse { "no se pudo mirar (${it.message ?: it})" }
+        log("tras ${ADDRESS_LOOK_MS / 1000} s en el wifi de la moto, interfaces de wifi directo: ${found.ifEmpty { "ninguna" }}")
+    }
+
+    /** Android waits about 36 s for the address; if it neither gets it nor gives up, undo it here. */
+    private val noAddress = Runnable {
+        val on = channel ?: return@Runnable
+        if (!listening || joined || waitingSince == 0L) return@Runnable
+        log("${ADDRESS_WAIT_MS / 1000} s en el wifi de la moto sin dirección: se deshace y se vuelve a pedir")
+        // The system may never say the phone is out: it is taken as out from here, and the group
+        // undone also by stop() if the undoing has not gone through by then.
+        groupLeft = true
+        stopWaiting()
+        undoHalfLink(on)
+        noAddressAfter()
     }
 
     /**
@@ -393,7 +511,9 @@ class BikeWifi(
                 }
                 joined = true
                 otherGroup = ""
+                passwordPending = false
                 main.removeCallbacks(usePassword)
+                stopWaiting()
                 runCatching { wifi.stopPeerDiscovery(on, null) }
                 val phone = ownAddressNear(owner)
                 log("dentro del wifi de la moto: ella ${owner.hostAddress}, el móvil ${phone?.hostAddress ?: "?"}")
@@ -458,6 +578,12 @@ class BikeWifi(
         const val GROUP_WAIT_MS = 1_000L
         const val OWNER_RETRIES = 5
         const val GROUP_WAITS = 5
+        /** When to look at the interface's addresses; the bike gave one in well under a second. */
+        const val ADDRESS_LOOK_MS = 10_000L
+        /** Longer than Android's own 36 s, which should be the one to give up. */
+        const val ADDRESS_WAIT_MS = 50_000L
+        /** After undoing the link: the undo and the looking again that follows it, done first. */
+        const val PASSWORD_AFTER_UNDO_MS = 5_000L
         /** [lastBike] when the bike is not among what the phone sees. */
         const val NOT_SEEN = -2
     }

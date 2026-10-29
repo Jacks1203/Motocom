@@ -161,6 +161,12 @@ class DisplayService() : IBikeDisplay.Stub() {
         return display?.display?.displayId ?: -1
     }
 
+    // Not synchronized: the screen's calls should not wait the seconds the dumps take.
+    override fun wifiReport(sinceMillis: Long): String {
+        allow()
+        return WifiReport.make(sinceMillis)
+    }
+
     /**
      * Its own screen, with no bars and nothing of the phone's on it. TRUSTED and OWN_FOCUS let
      * it take touches and keys of its own; ALWAYS_UNLOCKED keeps the lock screen off it;

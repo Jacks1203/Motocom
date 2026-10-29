@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.location.LocationManager
+import android.net.Network
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Handler
@@ -26,6 +27,7 @@ import com.motocom.bike.PhoneCard
 import com.motocom.shell.ShellLink
 import java.io.File
 import java.io.IOException
+import java.io.RandomAccessFile
 import java.net.InetAddress
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -72,9 +74,12 @@ class Moto private constructor(private val context: Context) {
     val waitingForAdb = mutableStateOf(false)
 
     init {
-        // Reading up to a megabyte is no work for the main thread.
         thread(isDaemon = true) {
-            val old = synchronized(file) { runCatching { if (file.exists()) file.readLines().takeLast(200) else null }.getOrNull() }
+            // Once per start of the app, before anything is going on that would wait for the file.
+            trimLog()
+            // Only the end, without the system's reports, which are for whoever reads the file.
+            val old = synchronized(file) { runCatching { if (file.exists()) tail() else null }.getOrNull() }
+                ?.lines()?.drop(1)?.filter { it.isNotEmpty() && !it.startsWith(REPORT_INDENT) }?.takeLast(200)
             if (old != null) main.post { lines.addAll(0, old) }
         }
         ShellLink.onReady = {
@@ -154,6 +159,16 @@ class Moto private constructor(private val context: Context) {
     @Volatile private var link: BikeLink? = null
     private var linkEvents: LinkEvents? = null
     private var wifi: BikeWifi? = null
+    /** The other way in: the bike's wifi joined as an ordinary one ([BikeNetwork]). */
+    private var network: BikeNetwork? = null
+    /** That ordinary wifi once in it, which the calls to the bike have to go on. */
+    @Volatile private var bikeNetwork: Network? = null
+    /** Which way this run is trying, or got in by. */
+    private var route = Route.WIFI_DIRECT
+    /** The ordinary wifi got in once in this run: when it goes, it is the bike switched off. */
+    private var wifiWorked = false
+    /** The ordinary wifi failed before Android ever let the app in: not tried again this run. */
+    private var wifiRefused = false
 
     /** Where the bike and the phone are on the bike's wifi, once in it; kept to call again. */
     @Volatile private var bikeAddress: InetAddress? = null
@@ -161,6 +176,12 @@ class Moto private constructor(private val context: Context) {
 
     /** One for the whole run, so the app stays on the bike's screen between attempts. */
     private var picture: MirrorPicture? = null
+
+    /** Since when the system's report has things not yet in the record. */
+    private var reportSince = 0L
+    /** Whether this run has had the bike showing, or a report on getting in without an address. */
+    private var shownThisRun = false
+    private var reportedNoAddress = false
 
     /** What is asked for before [connect]: the wifi-direct one, and notifications, which are optional. */
     val permissions: Array<String>
@@ -210,7 +231,7 @@ class Moto private constructor(private val context: Context) {
         }
         prefs.edit().putString(KEY_QR, text).apply()
         bike.value = read
-        log("QR de la moto: $text")
+        log("QR de la moto: ${text.replace(Regex("(?i)(pwd=)[^&]*"), "$1***")}")
         return true
     }
 
@@ -237,6 +258,13 @@ class Moto private constructor(private val context: Context) {
             main.post { if (running.value && picture === made) appPlace.value = place }
         }
         picture = made
+        reportSince = System.currentTimeMillis() - REPORT_BEFORE_MS
+        shownThisRun = false
+        reportedNoAddress = false
+        wifiWorked = false
+        wifiRefused = false
+        // The way that worked last time with this bike goes first.
+        route = if (bike.value?.ssid?.let { it == prefs.getString(KEY_ROUTE_WIFI, null) } == true) Route.WIFI else Route.WIFI_DIRECT
         BikeService.start(context)
         giveUpIn(SEARCH_MS)
         attempt()
@@ -259,20 +287,96 @@ class Moto private constructor(private val context: Context) {
 
     /** One go at the bike, from finding it to showing it; another when it goes and comes back. */
     private fun attempt() {
-        synchronized(file) {
-            runCatching { if (file.length() > MAX_BYTES) file.writeText(file.readText().takeLast(MAX_BYTES / 2)) }
-        }
         header()
         bikeAddress = null
         phoneAddress = null
+        bikeNetwork = null
         if (!openLink()) return
         log("escuchando en 10920, 10921 y 10922")
-        wifi = BikeWifi(
-            context, ::log, bike.value,
-            onJoined = { bike, phone -> joined(bike, phone) },
-            onLeft = { bikeLeft() }
-        ).also { it.start() }
+        startRoute()
     }
+
+    /** Into the bike's wifi the way [route] says: as wifi direct, or as an ordinary wifi. */
+    private fun startRoute() {
+        val qr = bike.value
+        if (route == Route.WIFI && qr != null) {
+            var made: BikeNetwork? = null
+            made = BikeNetwork(
+                context, ::log, qr,
+                approved = prefs.getString(KEY_APPROVED, null) == qr.ssid,
+                onJoined = { bike, phone, joinedOn ->
+                    if (network === made) {
+                        // Android does not ask again for a network it has let this app join.
+                        prefs.edit().putString(KEY_APPROVED, qr.ssid).apply()
+                        wifiWorked = true
+                        bikeNetwork = joinedOn
+                        joined(bike, phone)
+                    }
+                },
+                onFailed = { why -> main.post { if (network === made) wifiFailed(why) } },
+                onLeft = { if (network === made) bikeLeft() }
+            )
+            network = made
+            made.start()
+            return
+        }
+        var made: BikeWifi? = null
+        made = BikeWifi(
+            context, ::log, qr,
+            onJoined = { bike, phone -> joined(bike, phone) },
+            onLeft = { bikeLeft() },
+            onNoAddress = {
+                // Once a run: later ones would repeat it, and the one at the stop covers them.
+                if (!reportedNoAddress) {
+                    reportedNoAddress = true
+                    systemReport("el móvil entró en el wifi de la moto pero no recibió dirección")
+                }
+                // On some phones wifi direct never hands out the address: the same wifi, joined
+                // as an ordinary one, gets it the ordinary way.
+                if (qr != null && !wifiRefused) main.post { if (wifi === made) switchRoute(Route.WIFI, "el wifi directo no da dirección") }
+            }
+        )
+        wifi = made
+        made.start()
+    }
+
+    /**
+     * The ordinary wifi did not get in. Having got in before in this run, the bike is off or out
+     * of reach: it is asked for again, not wifi direct, which would only get in without an
+     * address. Never let in, it is not asked for again this run, so Android's question does not
+     * come back over and over.
+     */
+    private fun wifiFailed(why: String) {
+        if (wifiWorked) {
+            log("se vuelve a pedir el wifi normal de la moto, que ya funcionó")
+            network?.stop()
+            network = null
+            main.postDelayed({ if (running.value && link != null && !onTheWay()) startRoute() }, RETRY_MS)
+            return
+        }
+        if (prefs.getString(KEY_APPROVED, null) != bike.value?.ssid) wifiRefused = true
+        switchRoute(Route.WIFI_DIRECT, why)
+    }
+
+    /** One way did not get in: the other one, after a moment for the first to let go. */
+    private fun switchRoute(next: Route, why: String) {
+        if (!running.value || bikeAddress != null) return
+        log("se prueba a entrar ${next.how} ($why)")
+        // Joining an ordinary wifi takes many phones off the home one, and ADB started over
+        // wireless debugging goes with it, unless USB debugging is on.
+        if (next == Route.WIFI && !ShellLink.usbDebuggingOn()) {
+            log("aviso: con la depuración USB apagada, ADB puede pararse al cambiar de wifi")
+        }
+        wifi?.stop()
+        wifi = null
+        network?.stop()
+        network = null
+        route = next
+        main.postDelayed({ if (running.value && link != null && !onTheWay()) startRoute() }, RETRY_MS)
+    }
+
+    /** Whether one of the ways in is going, or in. */
+    private fun onTheWay() = wifi != null || network != null
 
     /** Opens the phone's ports for the bike. False, and everything stopped, if they are taken. */
     private fun openLink(): Boolean {
@@ -294,8 +398,11 @@ class Moto private constructor(private val context: Context) {
         val events = LinkEvents()
         // Only the bike may talk to these ports, not whoever shares a café's wifi with the
         // phone; a test build also lets in the cable, for codigo/moto_falsa.py.
-        val opened = BikeLink(card, shown, events, allow = { from ->
-            from == bikeAddress || (BuildConfig.CABLE_TESTS && from.isLoopbackAddress)
+        val opened = BikeLink(card, shown, events, allow = { from, to ->
+            from == bikeAddress || (BuildConfig.CABLE_TESTS && from.isLoopbackAddress) ||
+                // The bike's address on an ordinary wifi is a guess: any of that network will do,
+                // coming in on the phone's address there and not another network's.
+                (bikeNetwork != null && to != null && to == phoneAddress && sameNetwork(from, phoneAddress))
         })
         events.link = opened
         try {
@@ -325,6 +432,8 @@ class Moto private constructor(private val context: Context) {
             main.post {
                 if (retired || !running.value) return@post
                 if (state == BikeState.SHOWING && this@Moto.state.value != BikeState.SHOWING) {
+                    shownThisRun = true
+                    rememberRoute()
                     main.removeCallbacks(giveUp)
                     toast(text(R.string.connected))
                 }
@@ -343,6 +452,16 @@ class Moto private constructor(private val context: Context) {
         link?.let { knockUntilHeard(it, bike, phone) }
     }
 
+    /** The way that got the app onto the bike, so the next run goes straight that way. */
+    private fun rememberRoute() {
+        val ssid = bike.value?.ssid ?: return
+        if (route == Route.WIFI) prefs.edit().putString(KEY_ROUTE_WIFI, ssid).apply()
+        else if (prefs.getString(KEY_ROUTE_WIFI, null) == ssid) prefs.edit().remove(KEY_ROUTE_WIFI).apply()
+    }
+
+    private fun sameNetwork(a: InetAddress, b: InetAddress?): Boolean =
+        b != null && a.address.size == 4 && b.address.size == 4 && a.address.copyOf(3).contentEquals(b.address.copyOf(3))
+
     /**
      * The bike's wifi went away, as when it is switched off at a stop. Start over and keep
      * looking, so switching it on again is all it takes. The app stays on the bike's screen.
@@ -354,7 +473,7 @@ class Moto private constructor(private val context: Context) {
         giveUpIn(AFTER_LEFT_MS)
         closeAttempt()
         state.value = BikeState.LISTENING
-        main.postDelayed({ if (running.value && link == null && wifi == null) attempt() }, RETRY_MS)
+        main.postDelayed({ if (running.value && link == null && !onTheWay()) attempt() }, RETRY_MS)
     }
 
     /**
@@ -368,7 +487,7 @@ class Moto private constructor(private val context: Context) {
         retireLink()
         state.value = BikeState.LISTENING
         main.postDelayed({
-            if (!running.value || link != null || wifi == null) return@postDelayed
+            if (!running.value || link != null || !onTheWay()) return@postDelayed
             if (!openLink()) return@postDelayed
             val bike = bikeAddress ?: return@postDelayed
             link?.let { knockUntilHeard(it, bike, phoneAddress) }
@@ -387,6 +506,9 @@ class Moto private constructor(private val context: Context) {
     private fun closeAttempt() {
         wifi?.stop()
         wifi = null
+        network?.stop()
+        network = null
+        bikeNetwork = null
         bikeAddress = null
         retireLink()
     }
@@ -396,6 +518,8 @@ class Moto private constructor(private val context: Context) {
         if (!running.value) return
         main.removeCallbacks(giveUp)
         running.value = false
+        // A run that never got to the bike's screen: whatever the system saw goes in the record.
+        if (!shownThisRun) systemReport("parado sin llegar a ver la app en la moto")
         closeAttempt()
         val done = picture
         picture = null
@@ -460,8 +584,64 @@ class Moto private constructor(private val context: Context) {
                 home.frequency >= 5925 -> "6 GHz"
                 home.frequency >= 4900 -> "5 GHz"
                 else -> "2,4 GHz"
-            }})"
+            }}), señal ${home.rssi} dBm, ${home.linkSpeed} Mbps" +
+                (if (Build.VERSION.SDK_INT >= 30) ", estándar wifi ${home.wifiStandard}" else "")
         )
+        // Whether this phone can be in two wifis at once, which is what the bike's needs with a home one.
+        log("wifi del móvil: 5 GHz ${if (wifi?.is5GHzBandSupported == true) "sí" else "no"}, " +
+            "wifi directo ${if (wifi?.isP2pSupported == true) "sí" else "no"}, " +
+            "dos wifi normales a la vez ${if (Build.VERSION.SDK_INT >= 31 && wifi?.isStaConcurrencyForLocalOnlyConnectionsSupported == true) "sí" else "no"}")
+    }
+
+    /**
+     * What the system itself says about the wifi direct links since the last report, written
+     * into the record only, for a phone too far away to plug in. Needs the ADB worker.
+     */
+    private fun systemReport(why: String) {
+        val shell = ShellLink.display ?: return log("informe del sistema ($why): no se puede sacar sin ADB")
+        val since = reportSince
+        reportSince = System.currentTimeMillis()
+        log("informe del sistema ($why): sacándolo")
+        thread(name = "moto-informe", isDaemon = true) {
+            // An ADB worker from before an update would not know the call, and answers nothing.
+            val text = try {
+                shell.wifiReport(since) ?: "el proceso ADB es de una versión anterior: reinicia el móvil y vuelve a probar"
+            } catch (e: Exception) {
+                "no se pudo sacar (${e.message ?: e.javaClass.simpleName})"
+            }
+            // Whatever a phone maker prints of it, the bike's password does not travel in the record.
+            val secret = bike.value?.password?.takeIf { it.isNotEmpty() }
+            val body = text.let { if (secret != null) it.replace(secret, "***") else it }
+                .replace(Regex("(?i)(passphrase|psk|password|pwd)(\"?\\s*[=:]\\s*)(\"[^\"]*\"|(?!<)\\S+)"), "$1$2***")
+                .lines()
+            synchronized(file) {
+                val now = stamp.format(Date())
+                runCatching {
+                    file.appendText(buildString {
+                        append("$now  ======== informe del sistema: $why ========\n")
+                        body.forEach { append(REPORT_INDENT).append(it).append('\n') }
+                        append("$now  ======== fin del informe ========\n")
+                    })
+                }
+            }
+            log("informe del sistema: ${body.size} líneas guardadas en el registro (salen al enviarlo)")
+        }
+    }
+
+    /** The end of the record, about as much as the screen shows; the first line may come cut. */
+    private fun tail(): String = RandomAccessFile(file, "r").use { raf ->
+        val from = maxOf(0L, raf.length() - TAIL_BYTES)
+        raf.seek(from)
+        val bytes = ByteArray((raf.length() - from).toInt())
+        raf.readFully(bytes)
+        String(bytes, Charsets.UTF_8)
+    }
+
+    /** Keeps the record from growing for ever; never on the main thread, the file being megabytes. */
+    private fun trimLog() {
+        synchronized(file) {
+            runCatching { if (file.length() > MAX_BYTES) file.writeText(file.readText().takeLast(MAX_BYTES / 2)) }
+        }
     }
 
     /**
@@ -472,7 +652,7 @@ class Moto private constructor(private val context: Context) {
         thread(name = "moto-llamar", isDaemon = true) {
             var calls = 0
             while (this.link === link && link.bikeInfo == null) {
-                link.knock(bike, phone)
+                link.knock(bike, phone, bikeNetwork)
                 if (++calls == 10) log("la moto no ha venido tras 10 llamadas: se sigue llamando")
                 Thread.sleep(3000)
             }
@@ -495,7 +675,12 @@ class Moto private constructor(private val context: Context) {
     }
 
     companion object {
-        private const val MAX_BYTES = 1_000_000
+        /** Room for a few runs with the system's reports in them. */
+        private const val MAX_BYTES = 4_000_000
+        /** How the report's lines start in the record, which is also how they are kept off the screen. */
+        private const val REPORT_INDENT = "    | "
+        /** The report starts a little before Connect, to catch what led up to it. */
+        private const val REPORT_BEFORE_MS = 10_000L
         const val SEARCH_MS = 3 * 60 * 1000L
         const val AFTER_LEFT_MS = 10 * 60 * 1000L
         /** How long Connect waits for ADB before letting the phone sleep again. */
@@ -506,6 +691,12 @@ class Moto private constructor(private val context: Context) {
         private const val KEY_APP = "app"
         private const val KEY_DPI = "ppp"
         private const val KEY_QR = "qr"
+        /** The bike (its network's name) last got onto as an ordinary wifi, so it goes that way first. */
+        private const val KEY_ROUTE_WIFI = "camino_wifi"
+        /** The bike's network Android has already let this app join. */
+        private const val KEY_APPROVED = "wifi_aceptada"
+        /** About the last 200 lines of the record. */
+        private const val TAIL_BYTES = 200_000L
         /** 592 pixels across at this density is about a phone's width of map. */
         const val DEFAULT_DPI = 240
 
@@ -516,4 +707,10 @@ class Moto private constructor(private val context: Context) {
                 instance ?: Moto(context.applicationContext).also { instance = it }
             }
     }
+}
+
+/** The two ways into the bike's wifi. */
+private enum class Route(val how: String) {
+    WIFI_DIRECT("por wifi directo"),
+    WIFI("como wifi normal")
 }

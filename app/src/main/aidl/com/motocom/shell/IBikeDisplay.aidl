@@ -33,4 +33,11 @@ interface IBikeDisplay {
 
     /** The bike's screen id, or -1 if there is none right now. */
     int displayId() = 6;
+
+    /**
+     * What the system knows about the wifi direct links since [sinceMillis] (wall clock): its
+     * addresses, wifi direct's own record, how the address was asked for, and the system log.
+     * For the bike's record, when the phone gets into the bike's wifi but no further.
+     */
+    String wifiReport(long sinceMillis) = 7;
 }

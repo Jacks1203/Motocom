@@ -1,5 +1,6 @@
 package com.motocom.bike
 
+import android.net.Network
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
@@ -100,8 +101,11 @@ class BikeLink(
     private val pxcPort: Int = 10922,
     private val controlPort: Int = 10921,
     private val dataPort: Int = 10920,
-    /** Who may connect: anybody else on the same network is shown the door at once. */
-    private val allow: (InetAddress) -> Boolean = { true }
+    /**
+     * Who may connect, from where and to which of the phone's addresses: anybody else on the
+     * same network is shown the door at once.
+     */
+    private val allow: (from: InetAddress, to: InetAddress?) -> Boolean = { _, _ -> true }
 ) : Closeable {
 
     @Volatile private var closed = false
@@ -141,12 +145,14 @@ class BikeLink(
     /**
      * Tells the bike the phone is there and listening. The bike only comes to the phone's ports
      * after this. [from] ties the call to the wifi-direct side of a phone that is also on
-     * mobile data.
+     * mobile data; [network], to the bike's wifi joined as an ordinary one, which only routes
+     * what is made on it.
      */
-    fun knock(bike: InetAddress, from: InetAddress? = null, port: Int = 10930): Boolean {
+    fun knock(bike: InetAddress, from: InetAddress? = null, network: Network? = null, port: Int = 10930): Boolean {
         return try {
             Socket().use { socket ->
-                if (from != null) socket.bind(InetSocketAddress(from, 0))
+                if (network != null) network.bindSocket(socket)
+                else if (from != null) socket.bind(InetSocketAddress(from, 0))
                 socket.connect(InetSocketAddress(bike, port), 2000)
                 socket.soTimeout = 2000
                 val hello = buildJsonObject {
@@ -189,7 +195,7 @@ class BikeLink(
             while (!closed) {
                 val socket = try { door.accept() } catch (e: IOException) { break }
                 val from: InetAddress? = socket.inetAddress
-                if (from == null || !runCatching { allow(from) }.getOrDefault(false)) {
+                if (from == null || !runCatching { allow(from, socket.localAddress) }.getOrDefault(false)) {
                     if (from != null && refused.add(from)) events.log("conexión rechazada de ${from.hostAddress}")
                     runCatching { socket.close() }
                     continue
