@@ -2,23 +2,17 @@
 
 [English](LEEME.en.md) · **Español**
 
-La app actual muestra otras apps en la TFT y usa **ADB directo, sin Shizuku**. Consulta [la guía de conexión de Motocom 0.3](GUIA-CONEXION.md). La explicación que sigue documenta el protocolo de la moto y el código original de referencia.
+La app actual muestra otras apps en la TFT y usa **ADB directo, sin Shizuku**. Consulta [la guía de conexión](GUIA-CONEXION.md). La explicación que sigue documenta el protocolo de la moto y el código original de referencia.
 
 # Cómo se conecta el móvil a la pantalla de la moto
 
 Guía para llevar a **otro proyecto** la conexión directa con la pantalla TFT de la moto,
 sin Carbit Ride. Sacada de OffNavigator (versión 16.9, 08-10-2026), donde **funciona con la moto de
-verdad** desde el 30-09-2026. La historia completa de cómo se averiguó está en `PANTALLA-MOTO.md`, en
-la raíz de OffNavigator.
+verdad** desde el 30-09-2026.
 
 **En corto:** el móvil entra en el wifi propio de la moto (sin Bluetooth ni internet),
 le avisa de que está ahí, la moto se conecta al móvil, le pide un vídeo del tamaño de su pantalla y
 el móvil se lo va mandando. Lo que se vea en la moto es lo que la app dibuje en ese vídeo.
-
-**Para Claude en el otro proyecto:** en `codigo/` hay copia del código que ya funciona. Lo de la
-conversación (`BikeWire`, `BikeLink`, `BikeQr`) es Kotlin puro y se puede usar tal cual; lo de
-Android (`BikeWifi`, `BikeKeys`, `BikeEncoder`, `BikeService`, `BikeScreen`) hay que adaptarlo
-(paquetes, preferencias, y la vista que se pinta). Leer esta guía primero; el código lo confirma.
 
 ---
 

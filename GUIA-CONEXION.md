@@ -99,7 +99,7 @@ La conexión de vídeo con la moto no necesita internet. Los mapas o servicios d
 
 ## Fuera de casa, sin wifi
 
-Si ya ponía **ADB activo**, no hace falta nada: ADB sigue en marcha hasta reiniciar el móvil, aunque Android cierre Motocom. Si el móvil se ha reiniciado o apagado, usa el wifi de la moto (probado el 09-10-2026 con el POCO F5):
+Si ya ponía **ADB activo**, no hace falta nada: ADB sigue en marcha hasta reiniciar el móvil, aunque Android cierre Motocom. Si el móvil se ha reiniciado o apagado, usa el wifi de la moto:
 
 1. Enciende la moto y abre la conexión con el móvil en su pantalla.
 2. Lee el QR de la pantalla de la moto con Motocom (no necesita ADB). Toca la fila **Moto** de la pantalla principal: en **Wifi** verás cómo se llama la red de la moto y en **Contraseña**, su contraseña.
@@ -133,30 +133,4 @@ adb tcpip 5555
 
 En Motocom introduce **5555** como puerto de conexión, pulsa Iniciar ADB y acepta la autorización de la nueva clave en el móvil si aparece; reintenta si la autorización tarda más que la conexión. No uses los campos de emparejamiento. Tras ver **ADB activo** puedes desconectar el cable. Esta activación se pierde al reiniciar. Para cerrar el puerto TCP posteriormente, conecta por USB y ejecuta `adb usb`.
 
-## Implementación y alcance de las comprobaciones
-
-- `ShellLink`: emparejamiento ADB local, arranque de `ShellMain` mediante `app_process` y seguimiento del proceso.
-- `ShellProvider`: recibe el Binder solo de shell/root y con el identificador de la sesión actual.
-- `DisplayService`: crea la pantalla virtual con permisos shell; conserva la transferencia de `Surface` por Binder.
-- `MirrorPicture`, `BikeLink`, `BikeWifi`: codificación H.264 y conexión a la moto.
-- Se eliminan las bibliotecas, el proveedor y los botones de Shizuku.
-
-Comprobado en el teléfono conectado (Android 15 / API 35): tres pruebas instrumentadas correctas. El proceso lanzado con permisos ADB publica su Binder, crea una pantalla virtual real de 592 × 816 con una superficie del codificador, la libera y termina. También se comprueba la recarga de la identidad ADB y el rechazo de llamadas de una app sin privilegios.
-
-La prueba arranca el proceso mediante la instrumentación del teléfono, con permisos shell. Queda pendiente verificar el emparejamiento por código desde la interfaz y la conexión completa con la moto: vídeo, cambio de wifi y bloqueo de pantalla. No se ha probado la compatibilidad en otros modelos o versiones de Android.
-
 Referencias: [biblioteca LibADB Android](https://github.com/MuntashirAkon/libadb-android) y [documentación oficial de ADB](https://developer.android.com/tools/adb).
-
-## Compilar en este PC de 4 GB
-
-Usa siempre el lanzador con límite de memoria, una tarea cada vez:
-
-```sh
-scripts/gradle-low-memory.sh :app:assembleDebug
-scripts/gradle-low-memory.sh :app:assembleDebugAndroidTest
-scripts/gradle-low-memory.sh :app:lintDebug
-```
-
-El lanzador usa un grupo de control de systemd: máximo conjunto de **1100 MiB de RAM y 256 MiB de swap**, incluyendo procesos hijos. Impide dos compilaciones simultáneas. Gradle usa un worker y Kotlin se ejecuta en ese mismo proceso. No se inicia un emulador; las pruebas instrumentadas se ejecutan en un teléfono conectado.
-
-El límite es para las herramientas de compilación, no para todo el PC. Si se alcanza, hay que diagnosticar el fallo conservando el límite, en vez de lanzar más compilaciones o dejar memoria ilimitada.

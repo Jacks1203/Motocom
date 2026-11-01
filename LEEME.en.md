@@ -8,17 +8,11 @@ The current app shows other apps on the TFT and uses **direct ADB, without Shizu
 
 Guide for taking the direct connection with the bike's TFT screen, without Carbit Ride, to **another
 project**. Taken from OffNavigator (version 16.9, 2026-10-08), where it has **worked with the real
-bike** since 2026-09-30. The full story of how it was worked out is in `PANTALLA-MOTO.md`, in the
-root of OffNavigator (not in this repository).
+bike** since 2026-09-30.
 
 **In short:** the phone joins the bike's own Wi‑Fi (no Bluetooth or internet) and tells it that it's
 there; the bike connects to the phone, asks for a video the size of its screen, and the phone keeps
 sending it. What you see on the bike is whatever the app draws in that video.
-
-**For Claude in the other project:** `codigo/` has a copy of the working code. The conversation part
-(`BikeWire`, `BikeLink`, `BikeQr`) is pure Kotlin and can be used as is; the Android part (`BikeWifi`,
-`BikeKeys`, `BikeEncoder`, `BikeService`, `BikeScreen`) has to be adapted (packages, preferences and
-the view being drawn). Read this guide first; the code confirms it.
 
 ---
 
