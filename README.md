@@ -13,6 +13,13 @@ defecto, español).
 > **Proyecto no oficial.** No tiene relación con ningún fabricante de motos, ni con EasyConn ni Carbit. Solo se ha probado con
 > una moto y unos pocos móviles. Úsalo bajo tu responsabilidad y prueba siempre con la moto parada.
 
+## Vídeo
+
+En este [vídeo de YouTube](https://youtu.be/eCLog0vlEC8) se ve cómo funciona, qué permisos usa y cómo
+configurarla paso a paso.
+
+[![Vídeo de Motocom en YouTube](https://img.youtube.com/vi/eCLog0vlEC8/hqdefault.jpg)](https://youtu.be/eCLog0vlEC8)
+
 ## Instalar
 
 1. Descarga el último `motocom-vX.Y.apk` desde
