@@ -1,5 +1,7 @@
 # Motocom: instalación y uso
 
+[English](LEEME.en.md) · **Español**
+
 La app actual muestra otras apps en la TFT y usa **ADB directo, sin Shizuku**. Consulta [la guía de conexión de Motocom 0.3](GUIA-CONEXION.md). La explicación que sigue documenta el protocolo de la moto y el código original de referencia.
 
 # Cómo se conecta el móvil a la pantalla de la moto

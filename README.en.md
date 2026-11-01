@@ -104,7 +104,7 @@ The APK ends up in `app/build/outputs/apk/debug/`. The published version is buil
 ## Documentation
 
 - [GUIDE.md](GUIDE.md): installation and step-by-step use.
-- [LEEME.md](LEEME.md) (Spanish only): how the protocol of the bike's screen works.
+- [LEEME.en.md](LEEME.en.md): how the protocol of the bike's screen works.
 - `codigo/`: original reference code for the connection with the bike and `moto_falsa.py`, a
   simulator for testing without a bike.
 
