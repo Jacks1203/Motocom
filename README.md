@@ -1,7 +1,12 @@
 # Motocom
 
-App Android que manda la imagen de otra app del móvil (Waze, Google Maps u otra) a la pantalla TFT
-EasyConn de la moto, sin usar Carbit Ride ni internet.
+[English](README.en.md) · **Español**
+
+App Android que manda la imagen de otra app del móvil a la pantalla TFT EasyConn de la moto, sin
+usar Carbit Ride ni internet.
+
+**Funciona con cualquier app de navegación, no solo con Waze y Google Maps:** la eliges de la lista
+de apps instaladas en el móvil.
 
 El móvil entra en el wifi directo de la pantalla de la moto, crea una pantalla virtual de 592 × 816
 y le envía en vídeo H.264 la app elegida. Esa app se puede traer al móvil para escribir un destino y
@@ -36,7 +41,7 @@ imagen siga con el móvil bloqueado).
 
 ## Por qué necesita ADB
 
-Para que Waze o Maps salgan en la moto, Motocom crea una segunda pantalla del tamaño de la de la
+Para que la app de navegación salga en la moto, Motocom crea una segunda pantalla del tamaño de la de la
 moto, abre en ella la app elegida y la mueve entre esa pantalla y la del móvil. Android no deja
 que una app normal abra otras apps en una pantalla creada por ella: eso solo lo puede hacer el
 usuario «shell», el mismo que usa un ordenador conectado con `adb` (y apps como scrcpy).
@@ -67,9 +72,6 @@ Ese emparejamiento se quita al desconectar.
 | Permiso | Para qué lo usa Motocom |
 |---|---|
 | Cámara | Leer el código QR de la pantalla de la moto (nombre de su wifi y contraseña). Solo mientras lees el QR. |
-
-Los puertos de Motocom solo aceptan conexiones de la pantalla de la moto, no de otros aparatos del
-wifi en que esté el móvil.
 | Dispositivos wifi cercanos (Android 13+) | Encontrar el wifi directo de la pantalla de la moto. Está declarado como «no se usa para la ubicación». Imprescindible. |
 | Ubicación (solo Android 12 o anterior) | Esos Android la exigen para buscar dispositivos por wifi directo. Motocom no lee ni guarda tu ubicación. En Android 13+ no se pide. |
 | Ver y cambiar el wifi y la red | Conectarse al wifi directo de la moto. |
@@ -80,6 +82,9 @@ wifi en que esté el móvil.
 | Pedir quitar la optimización de batería | Ofrecer el botón «Permitir» para que Android no corte la imagen con el móvil bloqueado. Es opcional. |
 | Cambiar ajustes del sistema (`WRITE_SECURE_SETTINGS`) | Encender y apagar sola la depuración inalámbrica. No se puede pedir desde la app: se lo concede ella misma por ADB (ver arriba). |
 | Ver las apps instaladas | Mostrar la lista para elegir qué app va a la moto. |
+
+Los puertos de Motocom solo aceptan conexiones de la pantalla de la moto, no de otros aparatos del
+wifi en que esté el móvil.
 
 Motocom no tiene anuncios ni analíticas y no manda datos a ningún servidor. El registro de cada
 conexión se guarda solo en el móvil, y solo sale de él si tú lo compartes desde la pantalla

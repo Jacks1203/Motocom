@@ -1,6 +1,8 @@
 # Guía de conexión de Motocom
 
-Motocom conecta el móvil al wifi directo de la pantalla EasyConn de la moto, crea una pantalla virtual de 592 × 816 y envía vídeo H.264 de la app elegida (por ejemplo Waze o Google Maps). Puedes traer esa app al móvil para escribir un destino y devolverla a la moto. La densidad ajusta el tamaño de las letras.
+[English](GUIDE.md) · **Español**
+
+Motocom conecta el móvil al wifi directo de la pantalla EasyConn de la moto, crea una pantalla virtual de 592 × 816 y envía vídeo H.264 de la app elegida. **Funciona con cualquier app de navegación, no solo con Waze y Google Maps.** Puedes traer esa app al móvil para escribir un destino y devolverla a la moto. La densidad ajusta el tamaño de las letras.
 
 ADB da al proceso de pantalla los permisos de Android necesarios para abrir otras apps en ella (más detalle en [Por qué necesita ADB](README.md#por-qué-necesita-adb)). Esta versión integra el cliente ADB: no necesitas instalar ni iniciar Shizuku. El emparejamiento autoriza únicamente la identidad de Motocom en este móvil; no permite saltarse la autorización de Android.
 
