@@ -43,7 +43,13 @@ class DisplayService(private val context: Context) : IBikeDisplay.Stub() {
     private var display: VirtualDisplay? = null
     /** The connected device the screen belongs to, when it needed one; closing it ends both. */
     private var device: Any? = null
+    /** Apps allowed past battery saving here, to be undone by [release]. */
+    private val exempted = mutableSetOf<String>()
     @Volatile private var log: IShellLog? = null
+
+    init {
+        endLeftoverExemptions()
+    }
 
     /** Motocom's uid. The worker lives on after the app, so it answers to nobody else. */
     @Volatile var owner = -1
@@ -95,6 +101,8 @@ class DisplayService(private val context: Context) : IBikeDisplay.Stub() {
     @Synchronized
     override fun bring(packageName: String, component: String, displayId: Int): String {
         allow()
+        if (displayId != 0) exemptFromBatterySaving(packageName)
+        if (packageName == DMD2) reopenOn(displayId, packageName, component)?.let { return it }
         val moved = try {
             moveTask(packageName, displayId)
         } catch (e: Throwable) {
@@ -111,6 +119,75 @@ class DisplayService(private val context: Context) : IBikeDisplay.Stub() {
             return (if (startFailed(started)) "fallo: $text" else text).also(::say)
         }
         return moved.also(::say)
+    }
+
+    /**
+     * With the phone's screen off, Xiaomi freezes an app that shows only on the bike's, and the
+     * bike's picture stops with it. Allowed only for as long as this screen lasts, and left
+     * alone if the user had already allowed it, or if the list cannot be read to tell.
+     */
+    private fun exemptFromBatterySaving(packageName: String) {
+        if (packageName in exempted) return
+        val listed = output("cmd", "deviceidle", "whitelist")
+        if ("Error" in listed || "Exception" in listed) {
+            say("no se pudo leer la lista de ahorro de batería: ${tidy(listed)}")
+            return
+        }
+        // Not system-excidle, which still lets the app sleep.
+        if (listed.lineSequence().any { it.startsWith("user,$packageName,") || it.startsWith("system,$packageName,") }) return
+        // Noted first: the list outlives this process and a reboot, and this note is how the
+        // next process knows the permission was ours and not the user's.
+        runCatching { EXEMPTED_NOTE.writeText((exempted + packageName).joinToString("\n")) }
+            .onFailure { say("no se pudo anotar $packageName: $it; se deja su ahorro de batería"); return }
+        val said = run("cmd", "deviceidle", "whitelist", "+$packageName")
+        if ("Added" in said) exempted += packageName
+        say("$packageName sin restricción de batería: $said")
+    }
+
+    private fun endExemptions() {
+        exempted.forEach { say("$it vuelve a su ahorro de batería: " + run("cmd", "deviceidle", "whitelist", "-$it")) }
+        exempted.clear()
+        EXEMPTED_NOTE.delete()
+    }
+
+    /** What a process that ended without [release] left allowed. */
+    private fun endLeftoverExemptions() {
+        runCatching {
+            if (!EXEMPTED_NOTE.exists()) return
+            EXEMPTED_NOTE.readLines().filter { it.isNotBlank() }.forEach { run("cmd", "deviceidle", "whitelist", "-$it") }
+            EXEMPTED_NOTE.delete()
+        }
+    }
+
+    /**
+     * DMD2 keeps the sizes of the screen it was opened on when moved to the other one, and only
+     * looks right when opened there anew; it picks its route up again by itself. This goes both
+     * ways: opened anew on the phone, moved back to the bike it showed the phone's sizes. Null if
+     * it is not open on another screen, for the usual way to deal with.
+     */
+    private fun reopenOn(displayId: Int, packageName: String, component: String): String? {
+        // Any of its tasks elsewhere, not just the first listed: one may already be in place.
+        val elsewhere = runCatching {
+            val on = TaskInfo::class.java.getField("displayId")
+            tasks().filter {
+                it.baseActivity?.packageName == packageName || it.topActivity?.packageName == packageName
+            }.map { on.getInt(it) }.firstOrNull { it != displayId }
+        }.getOrNull() ?: return null
+        // A screen just taken away can still be named by its task; the phone's is the one to go back to.
+        val from = if (elsewhere == 0 || elsewhere == display?.display?.displayId) elsewhere else 0
+        fun start(display: Int) = output(
+            "am", "start", "--display", display.toString(), "--windowingMode", "1",
+            "-f", "0x10200000", // new task, reset if needed
+            "-n", component
+        )
+        val stopped = output("am", "force-stop", "--user", user(), packageName)
+        if ("Error" in stopped || "Exception" in stopped) return "fallo: am force-stop: ${tidy(stopped)}".also(::say)
+        val started = start(displayId)
+        if (!startFailed(started)) return "$packageName reabierta en la pantalla $displayId: ${tidy(started)}".also(::say)
+        // Closed and not opened: it goes back where it was rather than stay nowhere.
+        val back = start(from)
+        val where = if (startFailed(back)) "tampoco se pudo abrir donde estaba" else "de vuelta donde estaba"
+        return "fallo: no se pudo reabrir en la pantalla $displayId (${tidy(started)}); $where: ${tidy(back)}".also(::say)
     }
 
     /** An existing task brought forward, or the intent handed to it, still counts as there. */
@@ -131,6 +208,7 @@ class DisplayService(private val context: Context) : IBikeDisplay.Stub() {
         }
         display = null
         closeDevice()
+        endExemptions()
     }
 
     private fun closeDevice() {
@@ -437,6 +515,9 @@ class DisplayService(private val context: Context) : IBikeDisplay.Stub() {
 
     private companion object {
         const val SHELL = "com.android.shell"
+        const val DMD2 = "com.thorkracing.dmd2launcher"
+        /** Where the shell may write; the apps allowed past battery saving, one per line. */
+        val EXEMPTED_NOTE = java.io.File("/data/local/tmp/motocom-exempted")
         /** Longest a system command is waited for: am start and cmd answer in well under that. */
         const val COMMAND_S = 20L
 
