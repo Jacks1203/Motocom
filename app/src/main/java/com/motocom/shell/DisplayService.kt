@@ -16,6 +16,7 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
 import android.os.Process
+import android.os.SystemClock
 import android.view.Surface
 import androidx.annotation.RequiresApi
 import java.util.concurrent.Executor
@@ -46,9 +47,33 @@ class DisplayService(private val context: Context) : IBikeDisplay.Stub() {
     /** Apps allowed past battery saving here, to be undone by [release]. */
     private val exempted = mutableSetOf<String>()
     @Volatile private var log: IShellLog? = null
+    /** The bike's screen's id while there is one, for [remotes], which must not wait on the lock. */
+    @Volatile private var shownId = -1
+
+    /** A roadbook's remote, whose keys would otherwise go to the phone or, locked, nowhere. */
+    private val remotes = runCatching { BikeRemotes(::say) { remoteTarget() } }
+        .onFailure { android.util.Log.e("MotocomADB", "sin mandos", it) }.getOrNull()
 
     init {
         endLeftoverExemptions()
+    }
+
+    /** Since when the screen paints nowhere (the bike gone, Motocom waiting for it), 0 if it paints. */
+    @Volatile private var detachedAt = 0L
+
+    /**
+     * The bike's screen while some app is on it and the bike is there to show it, -1 otherwise.
+     * Before Android 14 the screen has no focus of its own, and keys sent to it while the phone
+     * has the focus were never tried: the remote stays with the phone there.
+     */
+    @SuppressLint("PrivateApi")
+    private fun remoteTarget(): Int {
+        val id = shownId
+        if (id < 0 || Build.VERSION.SDK_INT < 34) return -1
+        val detached = detachedAt
+        if (detached != 0L && SystemClock.elapsedRealtime() - detached > REMOTES_WITHOUT_BIKE_MS) return -1
+        val on = TaskInfo::class.java.getField("displayId")
+        return if (tasks().any { on.getInt(it) == id }) id else -1
     }
 
     /** Motocom's uid. The worker lives on after the app, so it answers to nobody else. */
@@ -78,11 +103,14 @@ class DisplayService(private val context: Context) : IBikeDisplay.Stub() {
         display?.let { shown ->
             shown.resize(width, height, dpi)
             shown.surface = surface
+            detachedAt = 0L
             return shown.display.displayId
         }
         return try {
             val made = create(surface, width, height, dpi)
             display = made
+            detachedAt = 0L
+            shownId = made.display.displayId
             say("pantalla para la moto hecha: ${width}x$height a $dpi ppp, número ${made.display.displayId}")
             made.display.displayId
         } catch (e: Throwable) {
@@ -95,6 +123,7 @@ class DisplayService(private val context: Context) : IBikeDisplay.Stub() {
     override fun detachSurface() {
         allow()
         display?.surface = null
+        if (detachedAt == 0L) detachedAt = SystemClock.elapsedRealtime()
     }
 
     /** Starts with "fallo: " when the app could neither be moved nor started there. */
@@ -207,6 +236,8 @@ class DisplayService(private val context: Context) : IBikeDisplay.Stub() {
             say("pantalla para la moto deshecha: lo que había vuelve al móvil")
         }
         display = null
+        shownId = -1
+        remotes?.letGo()
         closeDevice()
         endExemptions()
     }
@@ -520,6 +551,8 @@ class DisplayService(private val context: Context) : IBikeDisplay.Stub() {
         val EXEMPTED_NOTE = java.io.File("/data/local/tmp/motocom-exempted")
         /** Longest a system command is waited for: am start and cmd answer in well under that. */
         const val COMMAND_S = 20L
+        /** A short cut in the bike's picture keeps the remote on it; a longer one gives it back. */
+        const val REMOTES_WITHOUT_BIKE_MS = 15_000L
 
         // DisplayManager.VIRTUAL_DISPLAY_FLAG_*, several of them hidden.
         const val PUBLIC = 1

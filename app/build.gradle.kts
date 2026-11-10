@@ -15,8 +15,8 @@ android {
         // the phone locked, Android 13.
         minSdk = 29
         targetSdk = 36
-        versionCode = 20
-        versionName = "0.20"
+        versionCode = 21
+        versionName = "0.21"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         // Phones only: the x86 copies of the native libraries are for emulators.
         ndk { abiFilters += setOf("arm64-v8a", "armeabi-v7a") }
