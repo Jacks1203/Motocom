@@ -77,7 +77,7 @@ From then on, the display process talks to the app through Binder, with no netwo
 
 ## 4. Connect the bike
 
-1. Fully close Carbit Ride and OffNavigator: they use the same ports as Motocom.
+1. Fully close Carbit Ride: it uses the same ports as Motocom.
 2. Switch on the bike's screen and open its phone connection function.
 3. Turn on **Wi‑Fi** on the phone (and **location** if you have Android 12 or earlier).
 4. In Motocom, tap **Scan the bike's QR** and point at the code on its screen (the first time, it asks for camera permission). You only need to do this once; afterwards the bike appears in the **Bike** row. Scanning the QR doesn't connect yet.
@@ -117,7 +117,7 @@ If it already said **ADB on**, you don't need to do anything: ADB keeps running 
 | Connection refused | The port changes when you turn off debugging, change network or restart. Copy the current port again. |
 | ADB connects but the display doesn't start | Keep Motocom open and try again. There may be a manufacturer restriction; share the log. For diagnosis from a computer: `adb logcat -d -s MotocomADB`. |
 | Can't find the bike | Wi‑Fi on (and location on Android 12 or earlier), nearby devices permission granted and connection function open on the TFT. |
-| The bike doesn't get video | Close Carbit Ride and OffNavigator and connect again. If the panel says **The app didn't reach the bike**, tap **To the bike**. Share Motocom's log. |
+| The bike doesn't get video | Close Carbit Ride and connect again. If the panel says **The app didn't reach the bike**, tap **To the bike**. Share Motocom's log. |
 | Stops when locked | Check battery saving, the Android version and the restrictions of the chosen app. |
 
 To save the details of an attempt, tap the **Log** icon at the top right and then **Share log**. If a pairing gets no response, fully close Motocom and try again with a new code dialog.

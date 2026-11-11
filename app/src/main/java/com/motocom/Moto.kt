@@ -409,7 +409,7 @@ class Moto private constructor(private val context: Context) {
             opened.open()
         } catch (e: IOException) {
             // Carbit and OffNavigator listen on the very same ports, and only one can have them.
-            log("no se pueden abrir los puertos (${e.message}). Si Carbit u OffNavigator están abiertos, ciérralos del todo y vuelve a probar.")
+            log("no se pueden abrir los puertos (${e.message}). Si Carbit Ride está abierta, ciérrala del todo y vuelve a probar.")
             toast(text(R.string.ports_taken))
             events.retired = true
             thread(isDaemon = true) { opened.close() }

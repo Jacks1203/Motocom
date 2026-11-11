@@ -77,7 +77,7 @@ A partir de ahí el proceso de pantalla se comunica con la app mediante Binder, 
 
 ## 4. Conectar la moto
 
-1. Cierra completamente Carbit Ride y OffNavigator: usan los mismos puertos que Motocom.
+1. Cierra completamente Carbit Ride: usa los mismos puertos que Motocom.
 2. Enciende la pantalla de la moto y abre su función de conexión al teléfono.
 3. Activa el **wifi** en el móvil (y la **ubicación** si tu Android es el 12 o anterior).
 4. En Motocom, pulsa **Leer QR de la moto** y apunta al código de su pantalla (la primera vez pide permiso para la cámara). Solo hace falta la primera vez; después la moto aparece en la fila **Moto**. Leer el QR no conecta todavía.
@@ -117,7 +117,7 @@ Si ya ponía **ADB activo**, no hace falta nada: ADB sigue en marcha hasta reini
 | Conexión rechazada | El puerto cambia al desactivar depuración, cambiar de red o reiniciar. Vuelve a copiar el puerto actual. |
 | ADB conecta pero no arranca la pantalla | Mantén Motocom abierta y reintenta. Puede haber una restricción del fabricante; comparte el registro. Para diagnóstico por ordenador: `adb logcat -d -s MotocomADB`. |
 | No encuentra la moto | Wifi encendido (y ubicación en Android 12 o anterior), permiso de dispositivos cercanos concedido y función de conexión abierta en la TFT. |
-| La moto no recibe vídeo | Cierra Carbit Ride y OffNavigator y vuelve a conectar. Si el panel dice **La app no ha llegado a la moto**, pulsa **A la moto**. Comparte el registro de Motocom. |
+| La moto no recibe vídeo | Cierra Carbit Ride y vuelve a conectar. Si el panel dice **La app no ha llegado a la moto**, pulsa **A la moto**. Comparte el registro de Motocom. |
 | Se para al bloquear | Revisa el ahorro de batería, la versión de Android y las restricciones de la app elegida. |
 
 Para guardar los detalles del intento, toca el icono **Registro** de arriba a la derecha y después **Compartir**. Si un emparejamiento queda sin respuesta, cierra completamente Motocom y reintenta con un diálogo de código nuevo.
