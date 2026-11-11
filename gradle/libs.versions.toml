@@ -1,4 +1,4 @@
-# The same versions as OffNavigator, which already builds on this computer.
+# Library versions for the app.
 [versions]
 androidGradlePlugin = "9.0.1"
 androidxCore = "1.18.0"

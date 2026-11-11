@@ -2,13 +2,12 @@
 
 **English** · [Español](LEEME.md)
 
-The current app shows other apps on the TFT and uses **direct ADB, without Shizuku**. To install and use it, see the [connection guide](GUIDE.md). What follows documents the bike's protocol and the original reference code.
+The current app shows other apps on the TFT and uses **direct ADB, without Shizuku**. To install and use it, see the [connection guide](GUIDE.md). What follows documents the bike's protocol and where each part is in Motocom's code.
 
 # How the phone connects to the bike's screen
 
 Guide for taking the direct connection with the bike's TFT screen, without Carbit Ride, to **another
-project**. Taken from OffNavigator (version 16.9, 2026-10-08), where it has **worked with the real
-bike** since 2026-09-30.
+project**. It's the one Motocom uses, and it has **worked with the real bike** since 2026-09-30.
 
 **In short:** the phone joins the bike's own Wi‑Fi (no Bluetooth or internet) and tells it that it's
 there; the bike connects to the phone, asks for a video the size of its screen, and the phone keeps
@@ -61,8 +60,8 @@ the QR.
 ```
 
 The important part: **the phone is the server**. Without the "knock" in step 3, the bike does
-nothing. The first knock may arrive too early: it's repeated every 3 s, up to 10 times, until the
-bike introduces itself (`BikeScreen.knockUntilHeard`).
+nothing. The first knock may arrive too early: it's repeated every 3 s until the bike
+introduces itself (`Moto.knockUntilHeard`).
 
 ### Step 2: Wi‑Fi Direct (`BikeWifi.kt`)
 
@@ -159,10 +158,8 @@ Odd commands are replies: don't answer them.
 The RSA keys (1024 bits) are **made up by the phone** the first time and stored (`BikeKeys.kt`).
 They're no EasyConn secret; the bike only returns `encryptedHUID` when asking for an image.
 
-**The app name:** Carbit's (`net.easyconn.easyride.wws`, version 47) definitely works. OffNavigator
-tries its own name first and, if the bike shows nothing after 45 s on its Wi‑Fi, falls back to
-Carbit's. The notes don't yet record which one the bike really accepted. For the new app, the safe
-choice is to introduce itself as Carbit; if you want your own name, copy that mechanism.
+**The app name:** Carbit's (`net.easyconn.easyride.wws`, version 47) definitely works, and it's the
+one Motocom uses. With another name, it hasn't been checked that the bike shows the image.
 
 **`0x00020000` — here the phone asks.** Every second, and it also serves as the phone's heartbeat:
 
@@ -197,21 +194,20 @@ doesn't answer within `socketTimeoutPeriodWifi` seconds (9), treat the connectio
 
 ---
 
-## 5. Making the image — `BikeEncoder.kt`
+## 5. Making the image — `MirrorPicture.kt`
 
 - H.264 `MediaCodec` (`video/avc`) at **592 × 816**, `COLOR_FormatSurface`, the bitrate the bike asks
   for (4 Mbit/s), 30 fps, a full frame every 3 s, and `KEY_REPEAT_PREVIOUS_FRAME_AFTER = 100 ms` so
   frames come out even if the screen doesn't change.
-- It draws **directly on the encoder's surface**: `surface.lockHardwareCanvas()`, draw,
-  `unlockCanvasAndPost()`, about **15 times per second**. So no window is needed and the phone's
-  screen needn't be on: it works with the phone locked in your pocket.
+- The image is drawn **directly on the encoder's surface**, so the phone's screen needn't be on: it
+  works with the phone locked in your pocket. Motocom uses ADB to create a virtual screen the size of
+  the bike's that draws on that surface, and moves the chosen app there (`shell/DisplayService.kt`).
+  Without ADB, another way is to draw yourself with `surface.lockHardwareCanvas()`, draw and
+  `unlockCanvasAndPost()`.
 - Keep the SPS/PPS (`BUFFER_FLAG_CODEC_CONFIG` or `csd-0`/`csd-1`) and put it in front of the first
   full frame (`BUFFER_FLAG_KEY_FRAME`). Until you have a full one, discard the others.
 - If more than ~60 frames pile up without the bike asking for them, flush and request a full one
   (`PARAMETER_KEY_REQUEST_SYNC_FRAME`).
-- In OffNavigator, what gets drawn is `BikeView` (rotated map, route, data strip). In the new app it's
-  replaced by whatever you want to draw on a 592 × 816 `Canvas`. `BikeEncoder.kt` is copied as is, so
-  it names `BikeView` and `BikeLayout`, which are **not** in this folder.
 
 ---
 
@@ -224,7 +220,7 @@ GPS with the phone locked, it also needs its own location service.
 
 ---
 
-## 7. Reconnecting and giving up — `BikeScreen.kt`
+## 7. Reconnecting and giving up — `Moto.kt`
 
 - If the bike's Wi‑Fi is lost (switched off at a stop), close everything, wait 3 s for the ports to be
   released and start again. Search for it for 10 min; on opening, for 3 min. Any longer just wastes
@@ -237,8 +233,7 @@ GPS with the phone locked, it also needs its own location service.
 ## 8. Important warnings
 
 - **Carbit Ride and the new app can't run at the same time:** they use the same ports. If opening the
-  ports gives an error, Carbit (or OffNavigator) is open: close it completely. The same goes for
-  OffNavigator and the new app.
+  ports gives an error, Carbit Ride is open: close it completely.
 - **Don't copy anything from Carbit** into the new app (not its APK, its code or its `service_tsl.p12`
   TLS certificate): it isn't needed.
 - **Don't run tests involving uninstalling the app with your everyday phone connected to the
@@ -262,19 +257,19 @@ to the ports.)
 
 ---
 
-## 10. What's in `codigo/`
+## 10. Where each part is
+
+In `app/src/main/java/com/motocom/`:
 
 | File | What it does | Depends on Android |
 |---|---|---|
-| `BikeWire.kt` | PXC and RV format, image request | No |
-| `BikeLink.kt` | The whole conversation and sending the image (needs `kotlinx.serialization.json`) | No |
-| `BikeQr.kt` | Reads the bike's QR | No |
+| `bike/BikeWire.kt` | PXC and RV format, image request | No |
+| `bike/BikeLink.kt` | The whole conversation and sending the image (needs `kotlinx.serialization.json`) | No |
+| `bike/BikeQr.kt` | Reads the bike's QR | No |
 | `BikeWifi.kt` | Joins the Wi‑Fi Direct network | Yes |
 | `BikeKeys.kt` | The phone's UUID and RSA keys | Yes (preferences) |
-| `BikeEncoder.kt` | Draws and encodes to H.264 | Yes |
+| `MirrorPicture.kt` | Encodes the image to H.264 | Yes |
 | `BikeService.kt` | Foreground service | Yes |
-| `BikeScreen.kt` | Puts it all together: attempts, knock, reconnection, log | Yes (and OffNavigator things) |
-| `moto_falsa.py` | Fake bike for testing over the cable | — |
+| `Moto.kt` | Puts it all together: attempts, knock, reconnection, log | Yes |
 
-These are copies from 2026-10-08; the real ones remain in OffNavigator
-(`core/src/main/kotlin/com/offnavigator/core/bike/` and `app/src/main/java/com/offnavigator/bike/`).
+And in `codigo/moto_falsa.py`, the fake bike for testing over the cable.

@@ -107,8 +107,7 @@ El APK queda en `app/build/outputs/apk/debug/`. La versión publicada se hace co
 
 - [GUIA-CONEXION.md](GUIA-CONEXION.md): instalación y uso paso a paso.
 - [LEEME.md](LEEME.md): cómo funciona el protocolo de la pantalla de la moto.
-- `codigo/`: código de referencia original de la conexión con la moto y `moto_falsa.py`, un
-  simulador para hacer pruebas sin moto.
+- `codigo/moto_falsa.py`: un simulador de la moto para hacer pruebas sin ella.
 
 ## Licencia
 
