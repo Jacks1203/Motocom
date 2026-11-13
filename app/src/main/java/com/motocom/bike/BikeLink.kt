@@ -288,17 +288,27 @@ class BikeLink(
                     put("id", serial)
                 }.toString().toByteArray())
             }
-            Pxc.HUD_ICONS, Pxc.WEATHER, 0x00010740 -> {
-                once("c${asked.command}") { "la moto dice $asked ${asked.text.replace(Regex("\\s+"), "")}" }
-                Pxc.write(output, reply)
-            }
             Pxc.ENCRYPT -> {
                 // Not seen with this bike. Carbit would switch the connection to TLS here.
                 events.log("¡LA MOTO PIDE CIFRADO! No está hecho; se le dice que no.")
                 Pxc.write(output, Pxc.NOT_SUPPORTED)
             }
+            Pxc.CHECK_NETWORK, Pxc.WHERE_AM_I, Pxc.SHOW_TEXT, Pxc.CAN_GO_ONLINE -> {
+                said(asked)
+                val answer = when (asked.command) {
+                    Pxc.CHECK_NETWORK, Pxc.WHERE_AM_I -> buildJsonObject { put("status", false) }
+                    Pxc.CAN_GO_ONLINE -> buildJsonObject { put("status", 0) }
+                    else -> buildJsonObject { }
+                }
+                Pxc.write(output, reply, answer.toString().toByteArray())
+            }
+            Pxc.TOLD_NOT_ASKED -> said(asked)
+            in Pxc.PLAIN_YES -> {
+                said(asked)
+                Pxc.write(output, reply)
+            }
             else -> {
-                events.log("la moto pregunta algo nuevo: $asked ${asked.text.take(300)}")
+                events.log("la moto pregunta algo nuevo: $asked ${shown(asked)}")
                 Pxc.write(output, Pxc.NOT_SUPPORTED)
             }
         }
@@ -550,6 +560,19 @@ class BikeLink(
     private fun json(message: PxcMessage): JsonObject? =
         runCatching { Json.parseToJsonElement(message.text).jsonObject }.getOrNull()
 
+    /** One line the first time the bike says each thing, so a report shows what it asked. */
+    private fun said(asked: PxcMessage) = once("c${asked.command}") { "la moto dice $asked ${shown(asked)}" }
+
+    /**
+     * What the bike said, fit for a report people send around: one line, its passwords and
+     * serial numbers hidden, and nothing of what is not text (the microphone's sound, say).
+     */
+    private fun shown(asked: PxcMessage): String {
+        val text = asked.text.replace(Regex("\\s+"), "")
+        if (!text.startsWith("{")) return ""
+        return text.replace(SECRET, "$1\"***\"").take(300)
+    }
+
     /** Things that repeat every second are worth one line, not one a second. */
     private fun once(what: String, line: () -> String) {
         if (saidOnce.add(what)) events.log(line())
@@ -563,5 +586,6 @@ class BikeLink(
         const val MAX_BIKE_TIMEOUT_S = 120
         /** The bike opens four connections; a few more allow for it coming back. */
         const val MAX_OPEN = 16
+        val SECRET = Regex("(?i)(\"(?:password|pwd|psk|sn)\":)\"[^\"]*\"")
     }
 }

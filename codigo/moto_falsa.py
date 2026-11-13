@@ -35,6 +35,9 @@ p=con(10922); pxc_w(p,0x20000); print("abre P2C ->",hex(pxc_r(p)[0]))
 c,b=pxc_r(p); print("movil pregunta",hex(c),b.decode()); pxc_w(p,c+1)
 pxc_w(a,0x10450); c,b=pxc_r(a); print("hora",hex(c),b.decode())
 pxc_w(a,0x103E0,b'{"sn":"8DVLX36WDMMNHVP3TWGR2"}'); print("sn ->",hex(pxc_r(a)[0]))
+# Lo que preguntan las pantallas más nuevas (Rieju, 12-11-2026): debe dar 0x103b1, no 0x80000010.
+pxc_w(a,0x103B0,b'{"channel":"37512","uuid":"XXXXXXXXXXXX","password":"XXXX"}'); print("licencia ->",hex(pxc_r(a)[0]))
+pxc_w(a,0x10410); c,b=pxc_r(a); print("red ->",hex(c),b.decode())
 for _ in range(3):
     c,b=pxc_r(p); pxc_w(p,c+1)
     if c==0x201C0: print("veredicto",b.decode())
