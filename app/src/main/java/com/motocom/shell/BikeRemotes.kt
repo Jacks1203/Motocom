@@ -81,7 +81,8 @@ internal class BikeRemotes(
         wakeRound()
     }
 
-    private fun wakeRound() {
+    /** Looks again now at where keys go, instead of on the next round. */
+    fun wakeRound() {
         synchronized(wake) {
             pending = true
             wake.notifyAll()

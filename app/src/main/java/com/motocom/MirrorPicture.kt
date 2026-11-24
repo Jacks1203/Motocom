@@ -223,13 +223,28 @@ class MirrorPicture(
 
     /** The app to the phone, to type a destination; it stays there until [toBike]. */
     fun toPhone() = move {
+        followScreen()
         if (bringApp(0)) appOn = BY_USER
     }
 
     /** The app back to the bike's screen, if there is one. */
     fun toBike() = move {
-        val id = displayId
+        val id = followScreen()
         if (id >= 0 && bringApp(id)) appOn = id
+    }
+
+    /**
+     * The bike's screen's id now. Where Android pauses it with the phone locked, ADB makes it
+     * again under another number while the picture goes on, with the app moved to it.
+     */
+    private fun followScreen(): Int {
+        val now = runCatching { ShellLink.display?.displayId() }.getOrNull() ?: return displayId
+        val was = displayId
+        if (now >= 0 && was >= 0 && now != was) {
+            if (appOn == was) appOn = now
+            displayId = now
+        }
+        return displayId
     }
 
     /** Runs [work] on the one thread that moves the app, after whatever was asked before. */

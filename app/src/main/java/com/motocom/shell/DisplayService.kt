@@ -35,6 +35,10 @@ import kotlin.system.exitProcess
  * Android 17 on a Pixel puts every such screen with the phone's own, so the power button turns
  * the bike's off too. There it is made as the screen of a connected device instead, the way
  * screens streamed to a car or a computer are, and that kind keeps its own power.
+ *
+ * Others (a Motorola on Android 16) keep it apart from the phone's and still pause it when the
+ * phone locks, and the bike is left without a picture. The first pause tells: the screen is
+ * made again then on a connected device, with the app moved over, and so from then on.
  */
 /** [context] is the shell package's, from ShellMain. */
 class DisplayService(private val context: Context) : IBikeDisplay.Stub() {
@@ -49,6 +53,23 @@ class DisplayService(private val context: Context) : IBikeDisplay.Stub() {
     @Volatile private var log: IShellLog? = null
     /** The bike's screen's id while there is one, for [remotes], which must not wait on the lock. */
     @Volatile private var shownId = -1
+
+    /** What the screen paints into now and its sizes, to make it again as a device's; null while detached. */
+    private var shownSurface: Surface? = null
+    private var shownWidth = 0
+    private var shownHeight = 0
+    private var shownDpi = 0
+
+    /** Android paused the plain screen with the phone locked: it is to be a device's from now on. */
+    private var pausesWithPhone = false
+    /** One pairing at a time: made from the screen's thread too, outside the main lock. */
+    private val pairingLock = Any()
+    /** Making it a device's failed once on such a phone: it is not tried again, and stays plain. */
+    private var ownDeviceFailed = false
+    /** When the surface was last set or taken away here: Android tells that as a pause too. */
+    private var surfaceChangedAt = 0L
+    /** Whether the plain screen is paused now, from its last pause or resume. */
+    private var paused = false
 
     /** A roadbook's remote, whose keys would otherwise go to the phone or, locked, nowhere. */
     private val remotes = runCatching { BikeRemotes(::say) { remoteTarget() } }
@@ -101,15 +122,20 @@ class DisplayService(private val context: Context) : IBikeDisplay.Stub() {
     override fun show(surface: Surface, width: Int, height: Int, dpi: Int): Int {
         allow()
         display?.let { shown ->
+            // It paused while the bike was away: now that there is a surface again, it is redone.
+            if (wantsOwnDevice()) toOwnDevice(shown, surface, width, height, dpi)?.let { made ->
+                painting(surface, width, height, dpi)
+                return made.display.displayId
+            }
             shown.resize(width, height, dpi)
             shown.surface = surface
-            detachedAt = 0L
+            painting(surface, width, height, dpi)
             return shown.display.displayId
         }
         return try {
             val made = create(surface, width, height, dpi)
             display = made
-            detachedAt = 0L
+            painting(surface, width, height, dpi)
             shownId = made.display.displayId
             say("pantalla para la moto hecha: ${width}x$height a $dpi ppp, número ${made.display.displayId}")
             made.display.displayId
@@ -119,10 +145,66 @@ class DisplayService(private val context: Context) : IBikeDisplay.Stub() {
         }
     }
 
+    private fun painting(surface: Surface, width: Int, height: Int, dpi: Int) {
+        surfaceChangedAt = SystemClock.elapsedRealtime()
+        shownSurface = surface
+        shownWidth = width
+        shownHeight = height
+        shownDpi = dpi
+        detachedAt = 0L
+    }
+
+    /** The plain screen pauses with the phone here, and a device's has not failed yet. */
+    private fun wantsOwnDevice() =
+        Build.VERSION.SDK_INT >= 34 && pausesWithPhone && !ownDeviceFailed && device == null
+
+    /**
+     * Makes the bike's screen again on a connected device of its own, painting into [surface],
+     * and moves whatever was on [plain] to it. [plain] keeps the surface until the new one is
+     * made, so if that fails the picture goes on as it was. Null then.
+     */
+    @SuppressLint("PrivateApi")
+    private fun toOwnDevice(plain: VirtualDisplay, surface: Surface, width: Int, height: Int, dpi: Int): VirtualDisplay? {
+        if (Build.VERSION.SDK_INT < 34) return null
+        val old = plain.display.displayId
+        // A surface takes one screen at a time.
+        plain.surface = null
+        val events = Events()
+        val made = try {
+            onOwnDevice(surface, width, height, dpi, events)
+        } catch (e: Throwable) {
+            ownDeviceFailed = true
+            closeDevice()
+            plain.surface = surface
+            say("no se pudo rehacer como dispositivo conectado (${e.cause ?: e}): sigue como estaba, y se pausará al bloquear")
+            return null
+        }
+        events.of = made
+        val id = made.display.displayId
+        // Set before the old one goes, so its stop is not taken for this one's.
+        display = made
+        shownId = id
+        paused = false
+        val on = TaskInfo::class.java.getField("displayId")
+        val moved = runCatching {
+            tasks().filter { on.getInt(it) == old }.map { task ->
+                runCatching { moveToDisplay(task, id) }.fold({ "${task.taskId}" }, { "${task.taskId} no (${it.cause ?: it})" })
+            }
+        }.getOrElse { listOf("no se pudieron mirar las tareas (${it.cause ?: it})") }
+        runCatching { plain.release() }
+        say("pantalla de la moto rehecha como dispositivo conectado: número $id; tareas movidas: " +
+            moved.ifEmpty { listOf("ninguna") }.joinToString(", "))
+        // Keys go to the new number now, not on the remotes' next look.
+        remotes?.wakeRound()
+        return made
+    }
+
     @Synchronized
     override fun detachSurface() {
         allow()
         display?.surface = null
+        shownSurface = null
+        surfaceChangedAt = SystemClock.elapsedRealtime()
         if (detachedAt == 0L) detachedAt = SystemClock.elapsedRealtime()
     }
 
@@ -237,6 +319,8 @@ class DisplayService(private val context: Context) : IBikeDisplay.Stub() {
         }
         display = null
         shownId = -1
+        shownSurface = null
+        paused = false
         remotes?.letGo()
         closeDevice()
         endExemptions()
@@ -293,19 +377,24 @@ class DisplayService(private val context: Context) : IBikeDisplay.Stub() {
         fun plainOne(events: Events) = displayManager.createVirtualDisplay(
             "Pantalla de la moto", width, height, dpi, surface, flags(), events, handler
         )
-        val first = Events()
-        val plain = plainOne(first)
-        // Before 14 there is no screen of its own to be had, and none was asked for.
-        if (Build.VERSION.SDK_INT < 34 || !withThePhone(plain.display.displayId)) {
-            return plain.also { first.of = it }
+        if (wantsOwnDevice()) {
+            say("este móvil pausa la pantalla de la moto al bloquear: se hace como dispositivo conectado")
+        } else {
+            val first = Events()
+            val plain = plainOne(first)
+            // Before 14 there is no screen of its own to be had, and none was asked for.
+            if (Build.VERSION.SDK_INT < 34 || !withThePhone(plain.display.displayId)) {
+                return plain.also { first.of = it }
+            }
+            say("este Android apagaría la pantalla de la moto con la del móvil: se hace como dispositivo conectado")
+            plain.release() // Its own events stay unbound, so its stop is ignored.
         }
-        say("este Android apagaría la pantalla de la moto con la del móvil: se hace como dispositivo conectado")
-        plain.release() // Its own events stay unbound, so its stop is ignored.
         val events = Events()
         val made = try {
             onOwnDevice(surface, width, height, dpi, events)
         } catch (e: Throwable) {
             say("no se pudo hacer como dispositivo conectado (${e.cause ?: e}): se apagará al bloquear")
+            if (pausesWithPhone) ownDeviceFailed = true
             closeDevice()
             plainOne(events)
         }
@@ -362,7 +451,7 @@ class DisplayService(private val context: Context) : IBikeDisplay.Stub() {
     }
 
     /** The shell's pairing with the bike, made the first time and undone by [forgetPairing]. */
-    private fun association(): Int {
+    private fun association(): Int = synchronized(pairingLock) {
         findPairing()?.let { return it }
         say("emparejando la moto como dispositivo conectado: " +
             run("cmd", "companiondevice", "associate", user(), SHELL, PAIRING, APP_STREAMING))
@@ -405,9 +494,52 @@ class DisplayService(private val context: Context) : IBikeDisplay.Stub() {
         /** Set while [create] still holds the lock, before any event can be handled. */
         @Volatile var of: VirtualDisplay? = null
 
-        // Whether it pauses with the phone locked is the thing to find out on the road.
-        override fun onPaused() = say("la pantalla de la moto se pausa (¿móvil bloqueado?)")
-        override fun onResumed() = say("la pantalla de la moto sigue")
+        override fun onPaused() {
+            say("la pantalla de la moto se pausa (¿móvil bloqueado?)")
+            synchronized(this@DisplayService) {
+                if (display === of) paused = true
+            }
+            // Only the plain screen in use; a device's that pauses too is only told.
+            if (Build.VERSION.SDK_INT < 34) return
+            handler.postDelayed({ pausedWithPhone() }, PAUSE_CHECK_MS)
+        }
+
+        /**
+         * Taking the surface away, or handing a new one, is told as a pause too, on every phone.
+         * Only a pause that lasts, with a surface set well before it and the phone's screen off,
+         * is the phone's lock pausing the bike's screen.
+         */
+        private fun pausedWithPhone() {
+            fun stillPaused() = display === of && of != null && device == null && !ownDeviceFailed && paused &&
+                shownSurface != null && !phoneScreenOn()
+            fun settled() = SystemClock.elapsedRealtime() - surfaceChangedAt > PAUSE_CHECK_MS * 2
+            val ready = synchronized(this@DisplayService) {
+                if (!stillPaused()) return
+                settled()
+            }
+            // Paused straight after a new surface, as with the phone already locked when the bike
+            // asks for the picture: no other pause will come, so it is looked at again until the
+            // screen resumes or changes.
+            if (!ready) {
+                handler.postDelayed({ pausedWithPhone() }, PAUSE_CHECK_MS)
+                return
+            }
+            // The pairing takes its seconds, made here without holding up the app's calls.
+            runCatching { association() }.onFailure { say("no se pudo emparejar la moto como dispositivo conectado: ${it.cause ?: it}") }
+            synchronized(this@DisplayService) {
+                if (!stillPaused() || !settled()) return
+                pausesWithPhone = true
+                say("este móvil pausa la pantalla de la moto al bloquear: se rehace como dispositivo conectado")
+                toOwnDevice(of!!, shownSurface!!, shownWidth, shownHeight, shownDpi)
+            }
+        }
+
+        override fun onResumed() {
+            say("la pantalla de la moto sigue")
+            synchronized(this@DisplayService) {
+                if (display === of) paused = false
+            }
+        }
         override fun onStopped() {
             say("Android ha quitado la pantalla de la moto")
             // Comes on [handler]; the next show() then makes a new one instead of reusing it.
@@ -529,6 +661,16 @@ class DisplayService(private val context: Context) : IBikeDisplay.Stub() {
         // "Error" in it, so whoever looks for one in the answer sees it failed.
         exec(COMMAND_S, *command)?.trim() ?: "Error: ${command.joinToString(" ")} sin respuesta en $COMMAND_S s"
 
+    /** Whether the phone's own screen is on; when it cannot be told, taken as on, so nothing changes. */
+    private fun phoneScreenOn(): Boolean = runCatching {
+        (context.getSystemService(Context.POWER_SERVICE) as android.os.PowerManager).isInteractive
+    }.getOrElse {
+        if (!screenStateFailed) say("no se sabe si la pantalla del móvil está encendida ($it): la de la moto se deja como está")
+        screenStateFailed = true
+        true
+    }
+    @Volatile private var screenStateFailed = false
+
     private fun say(text: String) {
         runCatching { log?.line(text) }
     }
@@ -551,6 +693,8 @@ class DisplayService(private val context: Context) : IBikeDisplay.Stub() {
         val EXEMPTED_NOTE = java.io.File("/data/local/tmp/motocom-exempted")
         /** Longest a system command is waited for: am start and cmd answer in well under that. */
         const val COMMAND_S = 20L
+        /** How long a pause must last to be the phone's lock; twice that since the surface changed. */
+        const val PAUSE_CHECK_MS = 1_500L
         /** A short cut in the bike's picture keeps the remote on it; a longer one gives it back. */
         const val REMOTES_WITHOUT_BIKE_MS = 15_000L
 
