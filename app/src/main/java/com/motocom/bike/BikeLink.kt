@@ -97,6 +97,8 @@ class BikeLink(
     private val card: PhoneCard,
     private val picture: BikePicture,
     private val events: BikeEvents,
+    /** When the bike was last lost before this link (wall clock), 0 if never in this run. */
+    private val lostAt: Long = 0L,
     private val pxcPort: Int = 10922,
     private val controlPort: Int = 10921,
     private val dataPort: Int = 10920,
@@ -123,6 +125,9 @@ class BikeLink(
     /** What the bike asked for, kept for the data connection, which arrives separately. */
     @Volatile private var request: PictureRequest? = null
     @Volatile private var bikeTimeoutMs = 9000
+    /** When the bike last beat, and last said anything at all, on its channel (System.nanoTime), 0 if never. */
+    @Volatile private var lastBeatAt = 0L
+    @Volatile private var lastHeardAt = 0L
 
     /** The bike's own words about itself, once it has introduced itself. */
     @Volatile var bikeInfo: JsonObject? = null
@@ -241,7 +246,9 @@ class BikeLink(
                         // The bike beats once a second, so three of its own timeouts is plenty.
                         // Set every time: its introduction, on this very channel, may change it.
                         socket.soTimeout = 3 * bikeTimeoutMs
-                        answerBike(Pxc.read(input), output)
+                        val asked = Pxc.read(input)
+                        lastHeardAt = System.nanoTime()
+                        answerBike(asked, output)
                     }
                 }
             }
@@ -261,6 +268,7 @@ class BikeLink(
         val reply = asked.command + 1
         when (asked.command) {
             Pxc.HEARTBEAT -> {
+                lastBeatAt = System.nanoTime()
                 once("latido") { "la moto late" }
                 Pxc.write(output, reply)
             }
@@ -268,6 +276,7 @@ class BikeLink(
                 val info = json(asked)
                 bikeInfo = info
                 events.log("la moto se presenta: ${asked.text.replace(Regex("\\s+"), "")}")
+                info?.get("currentHUTime")?.jsonPrimitive?.longOrNull?.takeIf { it >= 0 }?.let(::sayUptime)
                 info?.get("socketTimeoutPeriodWifi")?.jsonPrimitive?.intOrNull
                     ?.takeIf { it > 0 }?.let { bikeTimeoutMs = it.coerceAtMost(MAX_BIKE_TIMEOUT_S) * 1000 }
                 Pxc.write(output, reply, greeting(info).toString().toByteArray())
@@ -334,7 +343,7 @@ class BikeLink(
             val answer = try {
                 Pxc.read(input)
             } catch (e: SocketTimeoutException) {
-                throw IOException("la moto no contesta a 0x%08X".format(next.command))
+                throw IOException("la moto no contesta a 0x%08X (${lastHeard()})".format(next.command))
             }
             if (answer.command != next.command + 1) {
                 once("r${next.command}") { "a 0x%08X la moto contesta $answer ${answer.text.take(200)}".format(next.command) }
@@ -343,6 +352,28 @@ class BikeLink(
             }
             next = toAsk.poll(1, TimeUnit.SECONDS) ?: inFront
         }
+    }
+
+    /** How long ago the bike last beat and last said anything, for the record of a cut. */
+    private fun lastHeard(): String {
+        fun ago(at: Long) = if (at == 0L) "nunca" else "hace %.1f s".format(Locale.ROOT, (System.nanoTime() - at) / 1e9)
+        return "su último latido ${ago(lastBeatAt)}, lo último que dijo ${ago(lastHeardAt)}"
+    }
+
+    /**
+     * The bike's screen says how long it has been on. After a cut, that tells a screen that
+     * started over from one that only stopped talking.
+     */
+    private fun sayUptime(onMs: Long) {
+        val now = System.currentTimeMillis()
+        val booted = now - onMs
+        val at = SimpleDateFormat("HH:mm:ss", Locale.ROOT).format(Date(booted))
+        events.log("la pantalla de la moto lleva encendida ${onMs / 1000} s (arrancó a las $at)")
+        if (lostAt <= 0) return
+        val cutAgo = (now - lostAt) / 1000
+        // The bike goes quiet up to half a minute before the phone calls it lost.
+        events.log(if (booted > lostAt - RESTART_MARGIN_MS) "la pantalla de la moto SE HA REINICIADO tras el corte de hace $cutAgo s"
+            else "la pantalla de la moto NO se ha reiniciado: ya estaba encendida antes del corte de hace $cutAgo s")
     }
 
     /**
@@ -366,7 +397,7 @@ class BikeLink(
 
     private fun lost(why: String) {
         if (!closed && goneSaid.compareAndSet(false, true)) {
-            events.log("se pierde la sesión con la moto: $why")
+            events.log("se pierde la sesión con la moto: $why (${lastHeard()})")
             events.gone(why)
         }
     }
@@ -584,6 +615,8 @@ class BikeLink(
         const val TALLY_MS = 10_000L
         const val MAX_FPS = 60
         const val MAX_BIKE_TIMEOUT_S = 120
+        /** A screen started this long before the cut was called still counts as started over by it. */
+        const val RESTART_MARGIN_MS = 90_000L
         /** The bike opens four connections; a few more allow for it coming back. */
         const val MAX_OPEN = 16
         val SECRET = Regex("(?i)(\"(?:password|pwd|psk|sn)\":)\"[^\"]*\"")

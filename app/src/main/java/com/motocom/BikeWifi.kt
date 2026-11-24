@@ -33,6 +33,11 @@ class BikeWifi(
     private val log: (String) -> Unit,
     /** What the bike's QR code said. Without it, anything named like the bikes seen so far will do. */
     private val bike: BikeQr?,
+    /**
+     * The bike was just lost. Its screen may be starting over, which takes longer than the
+     * password's usual wait, and the password tried too early only gets in the way.
+     */
+    private val afterLoss: Boolean = false,
     private val onJoined: (bike: InetAddress, phone: InetAddress?) -> Unit,
     /** The bike's wifi is gone: switched off, most likely. */
     private val onLeft: () -> Unit,
@@ -45,6 +50,16 @@ class BikeWifi(
     private var asked = false
     private var joined = false
     private var triedPassword = false
+    /** The password's request is out and not through yet; it keeps wifi direct busy meanwhile. */
+    private var passwordInFlight = false
+    /** Which password try is current: one undone must not send its request late. */
+    private var passwordTry = 0
+    /** When the current password request actually went out (elapsedRealtime), 0 before. */
+    private var passwordSentAt = 0L
+    /** When the current password try started, undoing included (elapsedRealtime). */
+    private var passwordTriedAt = 0L
+    /** When [start] was called (elapsedRealtime). */
+    private var startedAt = 0L
     /** Whether a half-made link of the phone's with the bike has been undone in this start. */
     private var cleaned = false
     /** Whether the system has said, since [start], what group the phone is in. */
@@ -102,18 +117,29 @@ class BikeWifi(
             return@Runnable
         }
         triedPassword = true
-        log("sigue fuera tras ${PASSWORD_AFTER_MS / 1000} s: entrando a ${known.ssid} con la contraseña del QR")
+        passwordInFlight = true
+        passwordSentAt = 0L
+        passwordTriedAt = SystemClock.elapsedRealtime()
+        val mine = ++passwordTry
+        fun current() = listening && !joined && on === channel && passwordInFlight && passwordTry == mine
+        log("sigue fuera tras ${(SystemClock.elapsedRealtime() - startedAt) / 1000} s: entrando a ${known.ssid} con la contraseña del QR")
         runCatching {
             val config = WifiP2pConfig.Builder().setNetworkName(known.ssid).setPassphrase(known.password).build()
             // Connecting before the cancel is done, or with a half group still there, fails with error 0.
             val connect = {
                 runCatching {
-                    if (listening && !joined && on === channel) wifi.connect(on, config, result("entrar con la contraseña"))
+                    if (current()) {
+                        // Its time to get in counts from here, not from the undoing before it.
+                        passwordSentAt = SystemClock.elapsedRealtime()
+                        main.removeCallbacks(passwordGiveUp)
+                        main.postDelayed(passwordGiveUp, PASSWORD_GIVE_UP_MS)
+                        wifi.connect(on, config, result("entrar con la contraseña"))
+                    }
                 }.onFailure { log("entrar con la contraseña: no se pudo (${it.message ?: it})") }
             }
             val removeGroup = {
                 runCatching {
-                    if (!listening || on !== channel) return@runCatching
+                    if (!current()) return@runCatching
                     wifi.removeGroup(on, object : WifiP2pManager.ActionListener {
                         override fun onSuccess() { main.postDelayed({ connect() }, UNDO_WAIT_MS) }
                         override fun onFailure(reason: Int) { connect() }
@@ -124,7 +150,37 @@ class BikeWifi(
                 override fun onSuccess() { removeGroup() }
                 override fun onFailure(reason: Int) { removeGroup() }
             })
-        }.onFailure { log("entrar con la contraseña: no se pudo (${it.message ?: it})") }
+        }.onFailure {
+            passwordInFlight = false
+            log("entrar con la contraseña: no se pudo (${it.message ?: it})")
+        }
+    }
+
+    /**
+     * Left pending, the password's request keeps wifi direct busy: no looking, and the bike not
+     * seen even once it is back. After a while it is undone, looking goes on the usual way, and
+     * the password is tried again later.
+     */
+    private val passwordGiveUp = Runnable {
+        val on = channel ?: return@Runnable
+        // Got in and waiting for the address: that wait has its own end (noAddress).
+        if (!listening || joined || !passwordInFlight || waitingForAddress()) return@Runnable
+        log("la contraseña no ha entrado en ${PASSWORD_GIVE_UP_MS / 1000} s: se cancela y se sigue buscando la moto como Carbit")
+        dropPassword(on)
+    }
+
+    /** Undoes the password's request and puts the password off for [PASSWORD_AGAIN_MS]. */
+    private fun dropPassword(on: WifiP2pManager.Channel) {
+        passwordTry++
+        passwordSentAt = 0L
+        passwordInFlight = false
+        passwordPending = false
+        main.removeCallbacks(passwordGiveUp)
+        main.removeCallbacks(usePassword)
+        triedPassword = false
+        asked = true // until the undo is done and looking starts again
+        undoHalfLink(on)
+        main.postDelayed(usePassword, PASSWORD_AGAIN_MS)
     }
 
     /**
@@ -173,6 +229,8 @@ class BikeWifi(
         askedOnce = false
         joined = false
         triedPassword = false
+        passwordInFlight = false
+        startedAt = SystemClock.elapsedRealtime()
         cleaned = false
         groupChecked = false
         ownerRetries = 0
@@ -185,7 +243,8 @@ class BikeWifi(
         groupLeft = false
         failures.clear()
         log(if (bike != null) "buscando la moto del QR: ${bike.name}" else "sin QR leído: buscando un aparato que empiece por $DEFAULT_PREFIX")
-        main.postDelayed(usePassword, PASSWORD_AFTER_MS)
+        main.postDelayed(usePassword, if (afterLoss) PASSWORD_AFTER_LOSS_MS else PASSWORD_AFTER_MS)
+        if (afterLoss) log("tras perder la moto, la contraseña espera ${PASSWORD_AFTER_LOSS_MS / 1000} s: su pantalla puede estar arrancando")
         ContextCompat.registerReceiver(
             context, receiver,
             IntentFilter().apply {
@@ -259,6 +318,18 @@ class BikeWifi(
                 groupChecked = true
             }
             if (linked && waitingForAddress()) return@requestPeers
+            if (passwordInFlight) {
+                // Seeing the bike is also what a password about to get in looks like: it is given
+                // its moment, and left alone once in and waiting for the address.
+                // Counted from the request, or from the try if the request never went out.
+                val since = passwordSentAt.takeIf { it > 0 } ?: passwordTriedAt
+                val young = SystemClock.elapsedRealtime() - since < PASSWORD_SIGHT_MS
+                if (young || waitingForAddress() || selfStatus == WifiP2pDevice.CONNECTED) return@requestPeers
+                // Asking on top of the password's request fails with error 0.
+                log("la moto se ve con la contraseña aún pendiente: se cancela y se pide como Carbit")
+                dropPassword(on)
+                return@requestPeers
+            }
             asked = true
             if (linked && !cleaned && !askedOnce && !triedPassword) {
                 // "Connected" or "invited" is how the bike stands with this phone, not with others.
@@ -316,6 +387,18 @@ class BikeWifi(
 
     /** What comes after getting in without an address: telling, then the password if it was put off. */
     private fun noAddressAfter() {
+        // The password got in without an address: it may be tried again later in this start.
+        if (passwordInFlight) {
+            passwordInFlight = false
+            passwordSentAt = 0L
+            passwordTry++
+            main.removeCallbacks(passwordGiveUp)
+            if (!passwordPending) {
+                triedPassword = false
+                main.removeCallbacks(usePassword)
+                main.postDelayed(usePassword, PASSWORD_AGAIN_MS)
+            }
+        }
         onNoAddress()
         if (listening && passwordPending) main.postDelayed(usePassword, PASSWORD_AFTER_UNDO_MS)
     }
@@ -432,7 +515,9 @@ class BikeWifi(
                 joined = true
                 otherGroup = ""
                 passwordPending = false
+                passwordInFlight = false
                 main.removeCallbacks(usePassword)
+                main.removeCallbacks(passwordGiveUp)
                 stopWaiting()
                 runCatching { wifi.stopPeerDiscovery(on, null) }
                 val phone = ownAddressNear(owner)
@@ -491,6 +576,14 @@ class BikeWifi(
         const val DEFAULT_PREFIX = "HJ-"
         /** Carbit took seven seconds to get in by asking. */
         const val PASSWORD_AFTER_MS = 25_000L
+        /** Just lost, the bike's screen was seen starting over: back after 15 s to several minutes. */
+        const val PASSWORD_AFTER_LOSS_MS = 90_000L
+        /** Carbit's way gets in within seconds; the password's request is not left blocking longer. */
+        const val PASSWORD_GIVE_UP_MS = 20_000L
+        /** Seeing the bike before this long after the password went out is not a reason to undo it. */
+        const val PASSWORD_SIGHT_MS = 10_000L
+        /** Undone, the password is tried again this much later. */
+        const val PASSWORD_AGAIN_MS = 120_000L
         const val LOOK_AGAIN_MS = 30_000L
         /** Time for the system to let go of the half-made link before asking again. */
         const val UNDO_WAIT_MS = 2_000L

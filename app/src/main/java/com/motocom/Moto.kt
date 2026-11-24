@@ -183,6 +183,8 @@ class Moto private constructor(private val context: Context) {
     private var reportSince = 0L
     /** Whether this run already has a report on getting in without an address. */
     private var reportedNoAddress = false
+    /** When the bike was last lost in this run (wall clock), 0 if not: tells a restarted screen from one that stayed on. */
+    private var lostAt = 0L
 
     /** What is asked for before [connect]: the wifi-direct one, and notifications, which are optional. */
     val permissions: Array<String>
@@ -261,6 +263,7 @@ class Moto private constructor(private val context: Context) {
         picture = made
         reportSince = System.currentTimeMillis() - REPORT_BEFORE_MS
         reportedNoAddress = false
+        lostAt = 0L
         wifiWorked = false
         wifiRefused = false
         // The way that worked last time with this bike goes first.
@@ -323,6 +326,7 @@ class Moto private constructor(private val context: Context) {
         var made: BikeWifi? = null
         made = BikeWifi(
             context, ::log, qr,
+            afterLoss = lostAt > 0,
             onJoined = { bike, phone -> joined(bike, phone) },
             onLeft = { bikeLeft() },
             onNoAddress = {
@@ -398,7 +402,7 @@ class Moto private constructor(private val context: Context) {
         val events = LinkEvents()
         // Only the bike may talk to these ports, not whoever shares a café's wifi with the
         // phone; a test build also lets in the cable, for codigo/moto_falsa.py.
-        val opened = BikeLink(card, shown, events, allow = { from, to ->
+        val opened = BikeLink(card, shown, events, lostAt = lostAt, allow = { from, to ->
             from == bikeAddress || (BuildConfig.CABLE_TESTS && from.isLoopbackAddress) ||
                 // The bike's address on an ordinary wifi is a guess: any of that network will do,
                 // coming in on the phone's address there and not another network's.
@@ -432,6 +436,8 @@ class Moto private constructor(private val context: Context) {
             main.post {
                 if (retired || !running.value) return@post
                 if (state == BikeState.SHOWING && this@Moto.state.value != BikeState.SHOWING) {
+                    // Back on the screen: a later loss is a new one, not this.
+                    lostAt = 0L
                     rememberRoute()
                     main.removeCallbacks(giveUp)
                     toast(text(R.string.connected))
@@ -468,6 +474,7 @@ class Moto private constructor(private val context: Context) {
     private fun bikeLeft() {
         if (!running.value) return
         log("la moto se ha ido (¿apagada?): se la vuelve a buscar")
+        lostAt = System.currentTimeMillis()
         toast(text(R.string.bike_left, AFTER_LEFT_MS / 60_000))
         giveUpIn(AFTER_LEFT_MS)
         closeAttempt()
@@ -482,6 +489,7 @@ class Moto private constructor(private val context: Context) {
     private fun relink(from: BikeLink, why: String) {
         if (!running.value || link !== from) return
         log("la moto ha dejado de hablar ($why): se la vuelve a llamar")
+        lostAt = System.currentTimeMillis()
         giveUpIn(AFTER_LEFT_MS)
         retireLink()
         state.value = BikeState.LISTENING
